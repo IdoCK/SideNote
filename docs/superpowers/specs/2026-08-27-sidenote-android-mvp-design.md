@@ -81,7 +81,7 @@ Setup and permission prompts require an unlocked device. If Capture is invoked f
 Capture is an edge-to-edge near-black screen without an app bar, Done button, Save button, history control, or settings control.
 
 - The upper 48–52% contains a centered grayscale voice-feedback blob approximately 112–144 dp across.
-- The lower region contains an off-white writing card approximately 80–88% of screen width and at least 144 dp high.
+- The lower region contains an off-white writing card approximately 80–88% of screen width and at least 144 dp high, with a restrained 4 dp corner radius.
 - The card uses near-black text and a quiet placeholder such as **Enter thought here…**.
 - A bottom-centered **Discard** control is the only explicit action and appears once the draft contains content.
 - When the device is locked, no existing note content, project list, history, or settings affordance is exposed.
