@@ -257,59 +257,20 @@
 
     .capture-screen { padding: 46px 18px 14px; overflow: hidden; }
 
-    .capture-meta {
-      z-index: 5;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      min-height: 42px;
-    }
-
-    .listening-label {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      font-size: 10px;
-      font-weight: 760;
-      letter-spacing: .15em;
-      color: #aaa;
-    }
-
-    .live-dot {
-      width: 7px;
-      height: 7px;
-      border-radius: 50%;
-      background: #d7d7d5;
-      box-shadow: 0 0 0 5px rgba(215,215,213,.09);
-      animation: live 1.4s ease-in-out infinite;
-    }
-
-    @keyframes live { 50% { opacity: .45; transform: scale(.78); } }
-
     .voice-space {
       position: relative;
       z-index: 1;
       flex: 1 1 49%;
+      width: 100%;
       display: grid;
       place-items: center;
       min-height: 225px;
-    }
-
-    .voice-space::before, .voice-space::after {
-      content: "";
-      position: absolute;
-      border: 1px solid rgba(255,255,255,.055);
-      border-radius: 50%;
-      animation: ring 3.4s ease-out infinite;
-    }
-
-    .voice-space::before { width: 224px; height: 224px; }
-    .voice-space::after { width: 166px; height: 166px; animation-delay: 1.1s; }
-
-    @keyframes ring {
-      0% { opacity: 0; transform: scale(.72); }
-      30% { opacity: .9; }
-      100% { opacity: 0; transform: scale(1.18); }
+      padding: 0;
+      border: 0;
+      color: inherit;
+      background: transparent;
+      cursor: pointer;
+      -webkit-tap-highlight-color: transparent;
     }
 
     .blob-wrap {
@@ -319,54 +280,38 @@
       height: 138px;
       display: grid;
       place-items: center;
-      filter: drop-shadow(0 18px 28px rgba(0,0,0,.75));
-      animation: breathe 2.8s ease-in-out infinite;
     }
 
     .blob {
       position: absolute;
       inset: 0;
-      border: 1px solid rgba(255,255,255,.38);
-      border-radius: 48% 52% 44% 56% / 54% 43% 57% 46%;
-      background:
-        radial-gradient(circle at 35% 28%, rgba(255,255,255,.95), transparent 21%),
-        radial-gradient(circle at 64% 70%, #777 0, transparent 46%),
-        linear-gradient(145deg, #dededb 5%, #aeaeaa 48%, #666 100%);
-      box-shadow: inset -18px -22px 32px rgba(31,31,31,.2), inset 14px 12px 24px rgba(255,255,255,.34);
-      animation: morph 4.2s ease-in-out infinite alternate;
+      border: 2px solid transparent;
+      border-radius: 50%;
+      background: #d4d4cf;
+      transition: transform 240ms var(--ease), background 240ms var(--ease), border-color 240ms var(--ease);
     }
 
-    @keyframes breathe { 50% { transform: scale(1.06); } }
-    @keyframes morph {
-      0% { border-radius: 48% 52% 44% 56% / 54% 43% 57% 46%; transform: rotate(-2deg); }
-      45% { border-radius: 54% 46% 56% 44% / 48% 58% 42% 52%; }
-      100% { border-radius: 44% 56% 49% 51% / 58% 45% 55% 42%; transform: rotate(3deg); }
+    .voice-space.is-off .blob {
+      border-color: #454545;
+      background: transparent;
+      transform: scale(.86);
     }
 
-    .waveform {
-      position: relative;
-      z-index: 2;
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      height: 62px;
+    .voice-space.is-speaking .blob {
+      background: #e2e2dd;
+      animation: speech-morph 720ms ease-in-out infinite alternate;
     }
 
-    .waveform i {
-      width: 4px;
-      height: 22px;
-      border-radius: 99px;
-      background: #3b3b3a;
-      box-shadow: 0 0 0 1px rgba(255,255,255,.08);
-      animation: wave 900ms ease-in-out infinite alternate;
+    .voice-space:focus-visible .blob {
+      outline: 2px solid #f2f1ec;
+      outline-offset: 8px;
     }
 
-    .waveform i:nth-child(2) { height: 48px; animation-delay: -540ms; }
-    .waveform i:nth-child(3) { height: 66px; animation-delay: -260ms; }
-    .waveform i:nth-child(4) { height: 38px; animation-delay: -680ms; }
-    .waveform i:nth-child(5) { height: 24px; animation-delay: -120ms; }
-
-    @keyframes wave { to { transform: scaleY(.58); opacity: .72; } }
+    @keyframes speech-morph {
+      0% { border-radius: 50% 50% 46% 54% / 48% 54% 46% 52%; transform: scale(.96) rotate(-1deg); }
+      45% { border-radius: 44% 56% 52% 48% / 56% 45% 55% 44%; transform: scale(1.08) rotate(2deg); }
+      100% { border-radius: 55% 45% 47% 53% / 46% 58% 42% 54%; transform: scale(1.02) rotate(-2deg); }
+    }
 
     .capture-zone {
       position: relative;
@@ -930,16 +875,9 @@
 
           <section class="app-screen capture-screen active" data-screen="capture" aria-labelledby="capture-title">
             <h2 class="sr-only" id="capture-title">Capture</h2>
-            <div class="capture-meta">
-              <div class="listening-label"><span class="live-dot"></span><span id="listening-copy">Listening · auto language</span></div>
-            </div>
-
-            <div class="voice-space" aria-label="Animated microphone feedback">
-              <div class="blob-wrap" aria-hidden="true">
-                <div class="blob"></div>
-                <div class="waveform"><i></i><i></i><i></i><i></i><i></i></div>
-              </div>
-            </div>
+            <button type="button" class="voice-space" id="voice-blob-button" aria-label="Voice input on" aria-pressed="true">
+              <span class="blob-wrap" aria-hidden="true"><span class="blob"></span></span>
+            </button>
 
             <div class="capture-zone">
               <div class="project-chips" id="project-chips" aria-live="polite"></div>
@@ -1019,6 +957,11 @@
             <section class="settings-group">
               <p class="settings-label">Voice</p>
               <div class="settings-card">
+                <div class="setting-row">
+                  <svg viewBox="0 0 24 24"><path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3zM5 11v1a7 7 0 0 0 14 0v-1M12 19v3"/></svg>
+                  <span><span class="setting-name">Voice on at launch</span><span class="setting-value">Start listening immediately</span></span>
+                  <button type="button" class="switch" id="voice-default-toggle" role="switch" aria-label="Voice on at launch" aria-checked="true"></button>
+                </div>
                 <div class="setting-row">
                   <svg viewBox="0 0 24 24"><path d="M4 15a4 4 0 0 1 4-4 6 6 0 0 1 11.5 2A3.5 3.5 0 0 1 19 20H7a3 3 0 0 1-3-3z"/></svg>
                   <span><span class="setting-name">Online fallback</span><span class="setting-value">Use Android speech service if local fails</span></span>
@@ -1132,16 +1075,42 @@
     ];
 
     let activeDay = 0;
+    let voiceDefaultOn = true;
+    let voiceEnabled = true;
     let setupStep = 0;
     let toastTimer;
+    let speechTimer;
     let projectDetailName = null;
 
     const captureInput = document.querySelector('#capture-input');
+    const voiceButton = document.querySelector('#voice-blob-button');
+    const voiceDefaultToggle = document.querySelector('#voice-default-toggle');
     const discardButton = document.querySelector('#discard-button');
     const chips = document.querySelector('#project-chips');
     const toast = document.querySelector('#save-toast');
     const toastCopy = document.querySelector('#toast-copy');
     const labState = document.querySelector('#lab-state');
+
+    function setVoiceEnabled(enabled, announce = true) {
+      voiceEnabled = enabled;
+      clearTimeout(speechTimer);
+      voiceButton.classList.toggle('is-off', !enabled);
+      voiceButton.classList.remove('is-speaking');
+      voiceButton.setAttribute('aria-pressed', String(enabled));
+      voiceButton.setAttribute('aria-label', enabled ? 'Voice input on' : 'Voice input off');
+      if (announce) labState.textContent = enabled ? 'Voice on' : 'Voice off';
+    }
+
+    function reactToSpeech() {
+      if (!voiceEnabled) return;
+      clearTimeout(speechTimer);
+      voiceButton.classList.add('is-speaking');
+      labState.textContent = 'Speech detected';
+      speechTimer = setTimeout(() => {
+        voiceButton.classList.remove('is-speaking');
+        labState.textContent = 'Listening';
+      }, 1600);
+    }
 
     function showScreen(name) {
       document.querySelectorAll('.app-screen').forEach(screen => screen.classList.toggle('active', screen.dataset.screen === name));
@@ -1282,7 +1251,12 @@
     }
 
     document.querySelectorAll('[data-show-screen]').forEach(button => button.addEventListener('click', () => showScreen(button.dataset.showScreen)));
-    captureInput.addEventListener('input', renderChips);
+    captureInput.addEventListener('input', () => {
+      renderChips();
+      setVoiceEnabled(false);
+    });
+
+    voiceButton.addEventListener('click', () => setVoiceEnabled(!voiceEnabled));
 
     discardButton.addEventListener('click', () => {
       captureInput.value = '';
@@ -1298,6 +1272,8 @@
 
     document.querySelector('#voice-tag-button').addEventListener('click', () => {
       showScreen('capture');
+      setVoiceEnabled(true, false);
+      reactToSpeech();
       if (!/@SideNote\b/u.test(captureInput.value)) captureInput.value = `${captureInput.value.trim()}${captureInput.value.trim() ? ' ' : ''}@SideNote`;
       renderChips();
       labState.textContent = 'Project tagged';
@@ -1307,7 +1283,12 @@
     document.querySelector('#previous-day').addEventListener('click', () => { activeDay = Math.min(notesByDay.length - 1, activeDay + 1); renderNotes(); });
     document.querySelector('#next-day').addEventListener('click', () => { activeDay = Math.max(0, activeDay - 1); renderNotes(); });
 
-    document.querySelectorAll('.switch').forEach(toggle => toggle.addEventListener('click', () => toggle.setAttribute('aria-checked', String(toggle.getAttribute('aria-checked') !== 'true'))));
+    document.querySelectorAll('.switch:not(#voice-default-toggle)').forEach(toggle => toggle.addEventListener('click', () => toggle.setAttribute('aria-checked', String(toggle.getAttribute('aria-checked') !== 'true'))));
+    voiceDefaultToggle.addEventListener('click', () => {
+      voiceDefaultOn = !voiceDefaultOn;
+      voiceDefaultToggle.setAttribute('aria-checked', String(voiceDefaultOn));
+      setVoiceEnabled(voiceDefaultOn);
+    });
     document.querySelector('#change-folder').addEventListener('click', event => {
       event.currentTarget.textContent = 'Selected';
       setTimeout(() => { event.currentTarget.textContent = 'Change'; }, 1300);
@@ -1322,6 +1303,8 @@
       const screen = keyMap[event.key.toLowerCase()];
       if (screen) showScreen(screen);
     });
+
+    setVoiceEnabled(voiceDefaultOn, false);
 
     document.querySelector('#clock').textContent = currentTime();
     renderNotes();

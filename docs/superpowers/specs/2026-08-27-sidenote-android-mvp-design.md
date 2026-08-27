@@ -53,7 +53,7 @@ Supporting units have narrow responsibilities:
 - **Speech engine:** tries Android on-device recognition first and optionally retries with the system default online-capable recognizer.
 - **Gesture coordinator:** observes face-down orientation, screen-off/background transitions, and repeated launch intents.
 - **Notification coordinator:** derives the unchecked count from Markdown and maintains the ongoing Review notification.
-- **Settings store:** retains only configuration such as the folder URI, online-fallback consent, and onboarding completion. It stores no note content or project index.
+- **Settings store:** retains only configuration such as the folder URI, voice-on-launch default, online-fallback consent, and onboarding completion. It stores no note content or project index.
 - **Recovery draft store:** temporarily mirrors an unsaved, non-empty capture in app-private storage. It is cleared immediately after a confirmed Markdown write or deliberate discard and is not a note database.
 
 There is no Room database, project table, note index, or processed-state index. Project membership and checkbox state are derived from Markdown every time they are needed.
@@ -92,20 +92,23 @@ Use a legible Android system/Noto sans family with complete English and Hebrew c
 
 ### Voice Feedback
 
-The blob is drawn with Compose Canvas. Speech-recognizer RMS callbacks feed a smoothed amplitude value that subtly changes the outline and scale while independently animating interior waveform bars.
+The blob is drawn with Compose Canvas. At rest it is a flat, static circle with no interior decoration. Speech-recognizer RMS callbacks feed a smoothed amplitude value that changes its outline and scale only while speech is detected.
 
-- Listening: gentle continuous deformation between roughly 0.96 and 1.08 scale.
-- Finalizing: slower contraction.
-- No input or error: still form plus concise status text or icon.
-- Reduced motion: fixed outline with waveform-level or opacity changes only.
+- Voice on, no speech: filled static circle.
+- Speech detected: organic outline deformation between roughly 0.96 and 1.08 scale.
+- Voice off: dim hollow circle.
+- Finalizing: brief contraction back to the resting circle.
+- Reduced motion: no deformation; speech may use a small fill-value change instead.
 
-Listening, failure, and saved states are never communicated through motion alone.
+The blob is a button with an accessible on/off label and pressed state. Saving remains confirmed by the existing toast and haptic feedback, so essential states are never communicated through motion alone.
 
 ### Speech and Typing
 
-Once one-time setup and permissions are complete, a normal or Quick Tap launch starts listening immediately.
+Once one-time setup and permissions are complete, a normal or Quick Tap launch starts listening immediately when **Voice on at launch** is enabled. This setting defaults to on and may be changed in Settings.
 
 - There is no language selector in Capture, onboarding, or Settings.
+- The voice blob is the only visible listening-state control. At rest it is a flat grey circle with no inner waveform or status label. It morphs only while microphone amplitude indicates speech. When voice is off it becomes a dim hollow circle.
+- Tapping the blob toggles voice input on or off. Typing immediately turns voice input off so microphone transcription cannot compete with manual edits; tapping the blob re-enables it.
 - On Android 14/API 34 and later, the recognition request enables automatic language switching with balanced sensitivity and constrains allowed languages to `en-US` and `he-IL`.
 - The recognizer reports detected-language and switch results through `RecognitionListener.onLanguageDetection`; SideNote does not ask the user to confirm the result.
 - Android on-device recognition is attempted first.
@@ -221,6 +224,7 @@ Checking an entry from a project view updates the checkbox in its original daily
 Settings provides:
 
 - Notes-folder selection/change.
+- Voice on at launch, enabled by default.
 - Allow online voice recognition.
 - Pixel Quick Tap setup instructions.
 - Permission status and recovery actions.
@@ -282,6 +286,7 @@ Automated unit and instrumentation tests cover:
 - Checkbox parsing and targeted `[ ]`/`[x]` rewrites without unrelated-file damage.
 - English, Hebrew, mixed bidirectional content, Unicode project names, timestamps, and punctuation.
 - Typed plus partial/final speech merging without loss of manual edits.
+- Voice-state transitions: default-on launch, manual blob toggle, typing-triggered off, and speech-only blob morphing.
 - On-device-first bilingual auto-detection/switching constrained to `en-US` and `he-IL`, including the unsupported-recognizer path and a single online-fallback attempt.
 - Explicit English/Hebrew voice-tag commands, multiple tags, and non-command speech.
 - Project discovery and cross-day aggregation derived only from Markdown.
