@@ -53,7 +53,7 @@ Supporting units have narrow responsibilities:
 - **Speech engine:** tries Android on-device recognition first and optionally retries with the system default online-capable recognizer.
 - **Gesture coordinator:** observes face-down orientation, screen-off/background transitions, and repeated launch intents.
 - **Notification coordinator:** derives the unchecked count from Markdown and maintains the ongoing Review notification.
-- **Settings store:** retains only configuration such as the folder URI, chosen speech language, online-fallback consent, and onboarding completion. It stores no note content or project index.
+- **Settings store:** retains only configuration such as the folder URI, online-fallback consent, and onboarding completion. It stores no note content or project index.
 - **Recovery draft store:** temporarily mirrors an unsaved, non-empty capture in app-private storage. It is cleared immediately after a confirmed Markdown write or deliberate discard and is not a note database.
 
 There is no Room database, project table, note index, or processed-state index. Project membership and checkbox state are derived from Markdown every time they are needed.
@@ -63,7 +63,7 @@ There is no Room database, project table, note index, or processed-state index. 
 Setup has three short steps:
 
 1. Choose a notes folder using Android's system folder picker. SideNote persists read/write access to that folder.
-2. Grant microphone permission and, on Android versions that require it, notification permission.
+2. Grant microphone permission and, on Android versions that require it, notification permission. SideNote checks that both English (`en-US`) and Hebrew (`he-IL`) speech models are available and requests supported on-device model downloads when needed.
 3. View illustrated Pixel instructions: **Settings → System → Gestures → Quick Tap → Open app → SideNote**.
 
 The voice-privacy disclosure appears once during setup:
@@ -105,10 +105,12 @@ Listening, failure, and saved states are never communicated through motion alone
 
 Once one-time setup and permissions are complete, a normal or Quick Tap launch starts listening immediately.
 
-- The selected recognition language is `en-US` or `he-IL`.
-- A compact EN/HE switch may change the active recognizer without navigating away.
+- There is no language selector in Capture, onboarding, or Settings.
+- On Android 14/API 34 and later, the recognition request enables automatic language switching with balanced sensitivity and constrains allowed languages to `en-US` and `he-IL`.
+- The recognizer reports detected-language and switch results through `RecognitionListener.onLanguageDetection`; SideNote does not ask the user to confirm the result.
 - Android on-device recognition is attempted first.
 - If the local recognizer is unavailable or fails for a recoverable support/network reason and online fallback is allowed, SideNote retries once using the system default recognizer.
+- Because Android documents that recognizer implementations may ignore automatic language switching, SideNote checks recognition support during setup. If neither the on-device nor permitted online recognizer supports the bilingual request, typed capture remains available and voice reports unavailable; the app never reintroduces a manual language picker.
 - If both paths fail, all typed text and any usable partial transcript remain in the card.
 - SideNote never retains raw microphone audio.
 
@@ -219,7 +221,6 @@ Checking an entry from a project view updates the checkbox in its original daily
 Settings provides:
 
 - Notes-folder selection/change.
-- English/Hebrew recognition language.
 - Allow online voice recognition.
 - Pixel Quick Tap setup instructions.
 - Permission status and recovery actions.
@@ -281,7 +282,7 @@ Automated unit and instrumentation tests cover:
 - Checkbox parsing and targeted `[ ]`/`[x]` rewrites without unrelated-file damage.
 - English, Hebrew, mixed bidirectional content, Unicode project names, timestamps, and punctuation.
 - Typed plus partial/final speech merging without loss of manual edits.
-- On-device-first recognition selection and single online-fallback attempt.
+- On-device-first bilingual auto-detection/switching constrained to `en-US` and `he-IL`, including the unsupported-recognizer path and a single online-fallback attempt.
 - Explicit English/Hebrew voice-tag commands, multiple tags, and non-command speech.
 - Project discovery and cross-day aggregation derived only from Markdown.
 - Idempotency under concurrent completion signals.
@@ -300,7 +301,7 @@ A physical Pixel 8 acceptance pass must verify:
 4. Stable face-down behavior saves once without false positives during ordinary holding/typing.
 5. A second Quick Tap delivers a repeated launch and saves; if the Pixel launcher does not deliver it, documentation records this platform limitation without adding accessibility-service privileges.
 6. Review/history/projects remain protected behind unlock.
-7. English and Hebrew on-device recognition and permitted online fallback behave on the configured device.
+7. English, Hebrew, and mixed-language utterances are recognized without a language selector; permitted online fallback behaves on the configured device.
 
 ## MVP Acceptance Criteria
 
