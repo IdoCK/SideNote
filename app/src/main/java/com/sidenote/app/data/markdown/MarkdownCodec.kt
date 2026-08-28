@@ -30,7 +30,8 @@ class MarkdownCodec {
         val separator = when {
             existing.isEmpty() -> ""
             existing.endsWith("\n\n") || existing.endsWith("\r\n\r\n") -> ""
-            existing.endsWith('\n') || existing.endsWith('\r') -> "\n"
+            existing.endsWith('\n') -> "\n"
+            existing.endsWith('\r') -> "\n\n"
             else -> "\n\n"
         }
         return existing + separator + task

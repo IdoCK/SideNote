@@ -21,6 +21,18 @@ class MarkdownCodecTest {
     }
 
     @Test
+    fun preservesLoneCarriageReturnAndAddsNormalizedBlankSeparator() {
+        val result = codec.appendEntry(
+            "# 2026-08-27\r",
+            NewCapture(LocalTime.of(9, 0), "One"),
+        )
+
+        assertThat(result).isEqualTo(
+            "# 2026-08-27\r\n\n- [ ] **09:00** One\n",
+        )
+    }
+
+    @Test
     fun parsesHebrewAndMixedBidiTextWithItsProjectTokens() {
         val source = "# 2026-08-27\n\n- [ ] **14:30** לקנות צבע @שיפוץ-הבית and @SideNote\n"
 
