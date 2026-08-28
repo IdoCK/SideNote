@@ -1,1 +1,14 @@
 .worktrees/
+
+# Android/Gradle generated files
+.gradle/
+.kotlin/
+build/
+app/build/
+local.properties
+
+# Android Studio / IntelliJ
+.idea/
+*.iml
+*.ipr
+*.iws
