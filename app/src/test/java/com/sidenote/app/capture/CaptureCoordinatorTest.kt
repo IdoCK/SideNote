@@ -16,6 +16,7 @@ import java.time.Clock
 import java.time.Instant
 import java.time.ZoneId
 import java.util.Locale
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -206,6 +207,73 @@ class CaptureCoordinatorTest {
     }
 
     @Test
+    fun userEditDuringSuspendedAppendIsRejected() = runTest {
+        val suspendedAppend = repository.suspendNextAppend()
+        coordinator.start(true, RecoveryDraft("stable draft", TextRange(12), true))
+        val completion = launch { coordinator.complete(CompletionSignal.ScreenOff) }
+        suspendedAppend.started.await()
+
+        coordinator.onUserEdit(TextFieldValue("late edit", TextRange(9)))
+
+        assertThat(coordinator.state.value.draft.text).isEqualTo("stable draft")
+        assertThat(coordinator.state.value.status).isEqualTo(CaptureStatus.Saving)
+        suspendedAppend.release.complete(Unit)
+        completion.join()
+        assertThat(repository.appends).containsExactly(AppendCall("stable draft", instant, zone))
+        assertThat(recovery.clearCalls).isEqualTo(1)
+        assertThat(closer.closeCalls).isEqualTo(1)
+    }
+
+    @Test
+    fun voiceToggleDuringSuspendedAppendIsRejected() = runTest {
+        val suspendedAppend = repository.suspendNextAppend()
+        coordinator.start(false, RecoveryDraft("stable draft", TextRange(12), false))
+        val completion = launch { coordinator.complete(CompletionSignal.FaceDown) }
+        suspendedAppend.started.await()
+
+        coordinator.onVoiceToggle()
+
+        assertThat(coordinator.state.value.voiceEnabled).isFalse()
+        assertThat(coordinator.state.value.status).isEqualTo(CaptureStatus.Saving)
+        suspendedAppend.release.complete(Unit)
+        completion.join()
+        assertThat(repository.appends).containsExactly(AppendCall("stable draft", instant, zone))
+        assertThat(coordinator.state.value.status).isEqualTo(CaptureStatus.Saved)
+    }
+
+    @Test
+    fun speechFailureDuringSuspendedAppendCannotReplaceSavingState() = runTest {
+        val suspendedAppend = repository.suspendNextAppend()
+        coordinator.start(true, RecoveryDraft("stable draft", TextRange(12), true))
+        val completion = launch { coordinator.complete(CompletionSignal.Backgrounded) }
+        suspendedAppend.started.await()
+
+        coordinator.onSpeechFailure()
+
+        assertThat(coordinator.state.value.status).isEqualTo(CaptureStatus.Saving)
+        assertThat(coordinator.state.value.draft.text).isEqualTo("stable draft")
+        suspendedAppend.release.complete(Unit)
+        completion.join()
+        assertThat(coordinator.state.value.status).isEqualTo(CaptureStatus.Saved)
+    }
+
+    @Test
+    fun stopPortSeesDisabledSavingStateBeforeReentrantCallback() = runTest {
+        var stateObservedByStop: CaptureState? = null
+        speech.onStop = {
+            stateObservedByStop = coordinator.state.value
+            coordinator.onSpeechFailure()
+        }
+        coordinator.start(true, RecoveryDraft("stable draft", TextRange(12), true))
+
+        coordinator.complete(CompletionSignal.RepeatedLaunch)
+
+        assertThat(stateObservedByStop?.voiceEnabled).isFalse()
+        assertThat(stateObservedByStop?.status).isEqualTo(CaptureStatus.Saving)
+        assertThat(coordinator.state.value.status).isEqualTo(CaptureStatus.Saved)
+    }
+
+    @Test
     fun blankCompletionClosesWithoutAppend() = runTest {
         coordinator.start(false, RecoveryDraft(" \n\t", TextRange(3), false))
 
@@ -262,6 +330,73 @@ class CaptureCoordinatorTest {
     }
 
     @Test
+    fun delayedSpeechFailureAfterTypingIsIgnored() {
+        coordinator.start(voiceDefaultOn = true, recovered = null)
+        coordinator.onSpeechPartial("speech")
+        coordinator.onUserEdit(TextFieldValue("speech plus typing", TextRange(18)))
+        val typedState = coordinator.state.value
+
+        coordinator.onSpeechFailure()
+
+        assertThat(coordinator.state.value).isEqualTo(typedState)
+    }
+
+    @Test
+    fun delayedSpeechFailureAfterVoiceOffIsIgnored() {
+        coordinator.start(voiceDefaultOn = true, recovered = null)
+        coordinator.onSpeechPartial("usable partial")
+        coordinator.onVoiceToggle()
+        val voiceOffState = coordinator.state.value
+
+        coordinator.onSpeechFailure()
+
+        assertThat(coordinator.state.value).isEqualTo(voiceOffState)
+    }
+
+    @Test
+    fun delayedSpeechFailureAfterAppendFailurePreservesSaveFailed() = runTest {
+        repository.result = AppendResult.Failure(RepositoryError.WriteFailed)
+        coordinator.start(true, RecoveryDraft("retry me", TextRange(8), true))
+        coordinator.complete(CompletionSignal.Backgrounded)
+        val failedState = coordinator.state.value
+
+        coordinator.onSpeechFailure()
+
+        assertThat(failedState.status).isEqualTo(CaptureStatus.SaveFailed)
+        assertThat(coordinator.state.value).isEqualTo(failedState)
+        assertThat(recovery.clearCalls).isEqualTo(0)
+        assertThat(closer.closeCalls).isEqualTo(0)
+    }
+
+    @Test
+    fun successfulCompletionRejectsAllLateEvents() = runTest {
+        coordinator.start(true, RecoveryDraft("saved draft", TextRange(11), true))
+        coordinator.complete(CompletionSignal.ScreenOff)
+        val savedState = coordinator.state.value
+
+        sendAllLateEvents()
+
+        assertThat(coordinator.state.value).isEqualTo(savedState)
+        assertThat(recovery.clearCalls).isEqualTo(1)
+        assertThat(haptic.confirmCalls).isEqualTo(1)
+        assertThat(closer.closeCalls).isEqualTo(1)
+    }
+
+    @Test
+    fun blankCompletionRejectsAllLateEvents() = runTest {
+        coordinator.start(false, RecoveryDraft(" \n", TextRange(2), false))
+        coordinator.complete(CompletionSignal.Backgrounded)
+        val closedState = coordinator.state.value
+
+        sendAllLateEvents()
+
+        assertThat(coordinator.state.value).isEqualTo(closedState)
+        assertThat(recovery.clearCalls).isEqualTo(1)
+        assertThat(haptic.confirmCalls).isEqualTo(0)
+        assertThat(closer.closeCalls).isEqualTo(1)
+    }
+
+    @Test
     fun discardNeverAppends() = runTest {
         coordinator.start(true, RecoveryDraft("do not save", TextRange(11), true))
 
@@ -273,6 +408,29 @@ class CaptureCoordinatorTest {
         assertThat(closer.closeCalls).isEqualTo(1)
         assertThat(coordinator.state.value.draft.text).isEmpty()
         assertThat(coordinator.state.value.status).isEqualTo(CaptureStatus.Discarded)
+    }
+
+    @Test
+    fun discardRejectsAllLateEvents() = runTest {
+        coordinator.start(true, RecoveryDraft("discarded draft", TextRange(15), true))
+        coordinator.discard()
+        val discardedState = coordinator.state.value
+
+        sendAllLateEvents()
+
+        assertThat(coordinator.state.value).isEqualTo(discardedState)
+        assertThat(repository.appends).isEmpty()
+        assertThat(recovery.clearCalls).isEqualTo(1)
+        assertThat(haptic.confirmCalls).isEqualTo(1)
+        assertThat(closer.closeCalls).isEqualTo(1)
+    }
+
+    private fun sendAllLateEvents() {
+        coordinator.onUserEdit(TextFieldValue("late edit", TextRange(9)))
+        coordinator.onVoiceToggle()
+        coordinator.onSpeechPartial("late partial")
+        coordinator.onSpeechFinal("late final", Locale.ENGLISH)
+        coordinator.onSpeechFailure()
     }
 }
 
@@ -286,10 +444,21 @@ private class RecordingDocumentRepository : DocumentRepository {
     val appends = mutableListOf<AppendCall>()
     var result: AppendResult = AppendResult.Success
     var beforeResult: (() -> Unit)? = null
+    private var suspendedAppend: SuspendedAppend? = null
+
+    fun suspendNextAppend(): SuspendedAppend = SuspendedAppend(
+        started = CompletableDeferred(),
+        release = CompletableDeferred(),
+    ).also { suspendedAppend = it }
 
     override suspend fun append(text: String, committedAt: Instant, zone: ZoneId): AppendResult {
         appends += AppendCall(text, committedAt, zone)
         beforeResult?.invoke()
+        suspendedAppend?.let { suspension ->
+            suspension.started.complete(Unit)
+            suspension.release.await()
+            suspendedAppend = null
+        }
         yield()
         return result
     }
@@ -306,6 +475,11 @@ private class RecordingDocumentRepository : DocumentRepository {
     override suspend fun uncheckedCount(): Int = 0
 }
 
+private data class SuspendedAppend(
+    val started: CompletableDeferred<Unit>,
+    val release: CompletableDeferred<Unit>,
+)
+
 private class RecordingRecoveryDraftStore : RecoveryDraftStore {
     var clearCalls = 0
 
@@ -320,9 +494,11 @@ private class RecordingRecoveryDraftStore : RecoveryDraftStore {
 
 private class RecordingSpeechControl : SpeechControl {
     var stopCalls = 0
+    var onStop: (() -> Unit)? = null
 
     override fun stop() {
         stopCalls += 1
+        onStop?.invoke()
     }
 }
 

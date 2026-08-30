@@ -31,107 +31,172 @@ class CaptureCoordinator(
     private val mutableState = MutableStateFlow(CaptureState())
     val state: StateFlow<CaptureState> = mutableState.asStateFlow()
 
+    private val transitionLock = Any()
     private var terminal = false
+    private var transitionVersion = 0L
 
     fun start(voiceDefaultOn: Boolean, recovered: RecoveryDraft?) {
-        terminal = false
-        mutableState.value = if (recovered == null) {
-            CaptureState(voiceEnabled = voiceDefaultOn)
-        } else {
-            CaptureState(
-                draft = TextFieldValue(recovered.text, recovered.selection),
-                voiceEnabled = recovered.voiceEnabled,
+        synchronized(transitionLock) {
+            terminal = false
+            publishState(
+                if (recovered == null) {
+                    CaptureState(voiceEnabled = voiceDefaultOn)
+                } else {
+                    CaptureState(
+                        draft = TextFieldValue(recovered.text, recovered.selection),
+                        voiceEnabled = recovered.voiceEnabled,
+                    )
+                },
             )
         }
     }
 
     fun onUserEdit(value: TextFieldValue) {
-        val current = mutableState.value
-        if (current.voiceEnabled) speech.stop()
-        mutableState.value = current.copy(
-            draft = value,
-            voiceEnabled = false,
-            speechOwnedRange = null,
-            rms = 0f,
-            status = CaptureStatus.Ready,
-        )
+        val shouldStop = synchronized(transitionLock) {
+            val current = mutableState.value
+            if (!acceptsInput(current)) return
+            publishState(
+                current.copy(
+                    draft = value,
+                    voiceEnabled = false,
+                    speechOwnedRange = null,
+                    rms = 0f,
+                    status = CaptureStatus.Ready,
+                ),
+            )
+            current.voiceEnabled
+        }
+        if (shouldStop) speech.stop()
     }
 
     fun onVoiceToggle() {
-        val current = mutableState.value
-        if (current.voiceEnabled) {
-            speech.stop()
-            mutableState.value = current.copy(
-                voiceEnabled = false,
-                speechOwnedRange = null,
-                rms = 0f,
-                status = CaptureStatus.Ready,
-            )
-        } else {
-            mutableState.value = current.copy(
-                voiceEnabled = true,
-                status = CaptureStatus.Ready,
+        val shouldStop = synchronized(transitionLock) {
+            val current = mutableState.value
+            if (!acceptsInput(current)) return
+            if (current.voiceEnabled) {
+                publishState(
+                    current.copy(
+                        voiceEnabled = false,
+                        speechOwnedRange = null,
+                        rms = 0f,
+                        status = CaptureStatus.Ready,
+                    ),
+                )
+                true
+            } else {
+                publishState(
+                    current.copy(
+                        voiceEnabled = true,
+                        status = CaptureStatus.Ready,
+                    ),
+                )
+                false
+            }
+        }
+        if (shouldStop) speech.stop()
+    }
+
+    fun onSpeechPartial(text: String) {
+        synchronized(transitionLock) {
+            if (!acceptsSpeech(mutableState.value)) return
+            replaceSpeechOwnedSpan(text, final = false)
+        }
+    }
+
+    fun onSpeechFinal(text: String, locale: Locale) {
+        synchronized(transitionLock) {
+            if (!acceptsSpeech(mutableState.value)) return
+            val command = ProjectSyntax.extractVoiceCommand(text, locale)
+            val visibleText = buildList {
+                command.projects.forEach { project -> add("@$project") }
+                if (command.text.isNotEmpty()) add(command.text)
+            }.joinToString(" ")
+            replaceSpeechOwnedSpan(visibleText, final = true)
+        }
+    }
+
+    fun onSpeechFailure() {
+        synchronized(transitionLock) {
+            val current = mutableState.value
+            if (!acceptsSpeech(current)) return
+            publishState(
+                current.copy(
+                    voiceEnabled = false,
+                    speechOwnedRange = null,
+                    rms = 0f,
+                    status = CaptureStatus.SpeechUnavailable,
+                ),
             )
         }
     }
 
-    fun onSpeechPartial(text: String) {
-        if (!mutableState.value.voiceEnabled) return
-        replaceSpeechOwnedSpan(text, final = false)
-    }
-
-    fun onSpeechFinal(text: String, locale: Locale) {
-        if (!mutableState.value.voiceEnabled) return
-        val command = ProjectSyntax.extractVoiceCommand(text, locale)
-        val visibleText = buildList {
-            command.projects.forEach { project -> add("@$project") }
-            if (command.text.isNotEmpty()) add(command.text)
-        }.joinToString(" ")
-        replaceSpeechOwnedSpan(visibleText, final = true)
-    }
-
-    fun onSpeechFailure() {
-        val current = mutableState.value
-        mutableState.value = current.copy(
-            voiceEnabled = false,
-            speechOwnedRange = null,
-            rms = 0f,
-            status = CaptureStatus.SpeechUnavailable,
-        )
-    }
-
+    @Suppress("UNUSED_PARAMETER")
     suspend fun complete(signal: CompletionSignal) {
         if (!saveMutex.tryLock()) return
         try {
-            if (terminal) return
-            val current = mutableState.value
-            val text = current.draft.text
-            if (text.isBlank()) {
-                terminal = true
+            val preparation = synchronized(transitionLock) {
+                if (terminal) return
+                val current = mutableState.value
+                val text = current.draft.text
+                if (text.isBlank()) terminal = true
+                publishState(
+                    current.copy(
+                        voiceEnabled = false,
+                        speechOwnedRange = null,
+                        rms = 0f,
+                        status = if (text.isBlank()) current.status else CaptureStatus.Saving,
+                    ),
+                )
+                SavePreparation(
+                    text = text,
+                    version = transitionVersion,
+                    stopSpeech = current.voiceEnabled,
+                )
+            }
+
+            if (preparation.stopSpeech) speech.stop()
+            if (preparation.text.isBlank()) {
                 recovery.clear()
                 closer.close()
                 return
             }
 
-            if (current.voiceEnabled) speech.stop()
-            mutableState.value = current.copy(
-                voiceEnabled = false,
-                speechOwnedRange = null,
-                rms = 0f,
-                status = CaptureStatus.Saving,
-            )
-            when (repository.append(text, clock.instant(), zone)) {
+            when (repository.append(preparation.text, clock.instant(), zone)) {
                 AppendResult.Success -> {
-                    terminal = true
+                    val exactSnapshot = synchronized(transitionLock) {
+                        val current = mutableState.value
+                        if (
+                            terminal ||
+                            transitionVersion != preparation.version ||
+                            current.status != CaptureStatus.Saving ||
+                            current.draft.text != preparation.text
+                        ) {
+                            false
+                        } else {
+                            terminal = true
+                            publishState(current.copy(status = CaptureStatus.Saved))
+                            true
+                        }
+                    }
+                    if (!exactSnapshot) return
                     recovery.clear()
-                    mutableState.value = mutableState.value.copy(status = CaptureStatus.Saved)
                     haptic.confirm()
                     closer.close()
                 }
 
                 AppendResult.Conflict,
                 is AppendResult.Failure,
-                -> mutableState.value = mutableState.value.copy(status = CaptureStatus.SaveFailed)
+                -> synchronized(transitionLock) {
+                    val current = mutableState.value
+                    if (
+                        !terminal &&
+                        transitionVersion == preparation.version &&
+                        current.status == CaptureStatus.Saving &&
+                        current.draft.text == preparation.text
+                    ) {
+                        publishState(current.copy(status = CaptureStatus.SaveFailed))
+                    }
+                }
             }
         } finally {
             saveMutex.unlock()
@@ -140,13 +205,20 @@ class CaptureCoordinator(
 
     suspend fun discard() {
         saveMutex.withLock {
-            if (terminal) return@withLock
-            terminal = true
+            val shouldStop = synchronized(transitionLock) {
+                if (terminal) return@withLock
+                val current = mutableState.value
+                terminal = true
+                publishState(
+                    CaptureState(
+                        voiceEnabled = false,
+                        status = CaptureStatus.Discarded,
+                    ),
+                )
+                current.voiceEnabled
+            }
+            if (shouldStop) speech.stop()
             recovery.clear()
-            mutableState.value = CaptureState(
-                voiceEnabled = false,
-                status = CaptureStatus.Discarded,
-            )
             haptic.confirm()
             closer.close()
         }
@@ -159,10 +231,29 @@ class CaptureCoordinator(
         val end = max(sourceRange.start, sourceRange.end).coerceIn(start, current.draft.text.length)
         val updatedText = current.draft.text.replaceRange(start, end, replacement)
         val cursor = start + replacement.length
-        mutableState.value = current.copy(
-            draft = TextFieldValue(updatedText, TextRange(cursor)),
-            speechOwnedRange = if (final) null else TextRange(start, cursor),
-            status = CaptureStatus.Ready,
+        publishState(
+            current.copy(
+                draft = TextFieldValue(updatedText, TextRange(cursor)),
+                speechOwnedRange = if (final) null else TextRange(start, cursor),
+                status = CaptureStatus.Ready,
+            ),
         )
     }
+
+    private fun acceptsInput(state: CaptureState): Boolean =
+        !terminal && state.status != CaptureStatus.Saving
+
+    private fun acceptsSpeech(state: CaptureState): Boolean =
+        acceptsInput(state) && state.voiceEnabled && state.status == CaptureStatus.Ready
+
+    private fun publishState(state: CaptureState) {
+        mutableState.value = state
+        transitionVersion += 1
+    }
+
+    private data class SavePreparation(
+        val text: String,
+        val version: Long,
+        val stopSpeech: Boolean,
+    )
 }
