@@ -36,6 +36,7 @@ dependencies {
     implementation(libs.compose.ui)
     implementation(libs.compose.ui.tooling.preview)
     implementation(libs.core.ktx)
+    implementation(libs.datastore.preferences)
     implementation(libs.documentfile)
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.lifecycle.runtime.ktx)
@@ -44,6 +45,8 @@ dependencies {
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)
     testImplementation(libs.truth)
+    testImplementation("org.json:json:20250517")
+    testImplementation("org.robolectric:robolectric:4.16.1")
 
     androidTestImplementation(platform(libs.compose.bom))
     androidTestImplementation(libs.androidx.junit)

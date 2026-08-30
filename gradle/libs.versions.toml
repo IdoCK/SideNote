@@ -29,6 +29,7 @@ compose-ui-test-junit4 = { module = "androidx.compose.ui:ui-test-junit4" }
 compose-ui-tooling = { module = "androidx.compose.ui:ui-tooling" }
 compose-ui-tooling-preview = { module = "androidx.compose.ui:ui-tooling-preview" }
 core-ktx = { module = "androidx.core:core-ktx", version.ref = "coreKtx" }
+datastore-preferences = { module = "androidx.datastore:datastore-preferences", version.ref = "datastore" }
 documentfile = { module = "androidx.documentfile:documentfile", version.ref = "documentfile" }
 espresso-core = { module = "androidx.test.espresso:espresso-core", version.ref = "espresso" }
 junit = { module = "junit:junit", version.ref = "junit" }

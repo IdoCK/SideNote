@@ -3,7 +3,8 @@
     <application
         android:name=".SideNoteApplication"
         android:allowBackup="false"
-        android:fullBackupContent="false"
+        android:fullBackupContent="@xml/backup_rules"
+        android:dataExtractionRules="@xml/data_extraction_rules"
         android:label="SideNote"
         android:supportsRtl="true"
         android:theme="@android:style/Theme.Material.Light.NoActionBar">
