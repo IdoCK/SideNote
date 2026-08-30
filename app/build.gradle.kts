@@ -36,15 +36,20 @@ dependencies {
     implementation(libs.compose.ui)
     implementation(libs.compose.ui.tooling.preview)
     implementation(libs.core.ktx)
+    implementation(libs.documentfile)
+    implementation(libs.kotlinx.coroutines.core)
     implementation(libs.lifecycle.runtime.ktx)
     implementation(libs.material3)
 
     testImplementation(libs.junit)
+    testImplementation(libs.kotlinx.coroutines.test)
     testImplementation(libs.truth)
 
     androidTestImplementation(platform(libs.compose.bom))
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.compose.ui.test.junit4)
     androidTestImplementation(libs.espresso.core)
+    androidTestImplementation(libs.kotlinx.coroutines.test)
+    androidTestImplementation(libs.truth)
     debugImplementation(libs.compose.ui.tooling)
 }
