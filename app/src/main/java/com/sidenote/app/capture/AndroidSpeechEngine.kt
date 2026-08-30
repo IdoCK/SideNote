@@ -84,14 +84,22 @@ class AndroidSpeechEngine internal constructor(
                         languageTag !in support.installedOnDeviceLanguages &&
                         languageTag !in support.pendingOnDeviceLanguages
                 if (downloadNeeded) {
+                    val reserved = synchronized(lock) {
+                        !destroyed &&
+                            session in probes &&
+                            requestedDownloads.add(languageTag)
+                    }
+                    if (!reserved) return@forEach
                     try {
-                        synchronized(lock) {
-                            if (
-                                !destroyed &&
-                                session in probes &&
-                                requestedDownloads.add(languageTag)
-                            ) {
-                                mainThread.run { session.requestModelDownload(request) }
+                        mainThread.run {
+                            synchronized(lock) {
+                                if (
+                                    !destroyed &&
+                                    session in probes &&
+                                    languageTag in requestedDownloads
+                                ) {
+                                    session.requestModelDownload(request)
+                                }
                             }
                         }
                     } catch (exception: CancellationException) {

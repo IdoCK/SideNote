@@ -3,7 +3,10 @@ package com.sidenote.app.capture
 import android.speech.SpeechRecognizer
 import com.google.common.truth.Truth.assertThat
 import java.util.Collections
+import java.util.concurrent.ExecutionException
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -452,6 +455,47 @@ class AndroidSpeechEnginePolicyTest {
     }
 
     @Test
+    fun backgroundDownloadReleasesLifecycleLockBeforeMainCallbackStartAndDestroy() = runTest {
+        DedicatedSpeechMainThread().use { mainThread ->
+            val firstSupport = CompletableDeferred<RecognitionSupportSnapshot>()
+            val supportStarted = CompletableDeferred<Unit>()
+            val localSupport = RecognitionSupportSnapshot(
+                supportedOnDeviceLanguages = setOf("en-US", "he-IL"),
+            )
+            val factory = FakeRecognitionSessionFactory(
+                localSupport = localSupport,
+                firstLocalSupport = firstSupport,
+                supportStarted = supportStarted,
+            )
+            val engine = AndroidSpeechEngine(
+                onlineFallbackAllowed = false,
+                sessionFactory = factory,
+                mainThread = mainThread,
+            )
+            val firstListener = RecordingSpeechListener()
+
+            engine.start(firstListener)
+            val capture = factory.created.single()
+            val preparation = async(Dispatchers.Default) {
+                engine.requestModelDownloads()
+            }
+            supportStarted.await()
+            mainThread.beforeNextBackgroundRun {
+                capture.emitPartial("main callback")
+                engine.start(RecordingSpeechListener())
+                engine.destroy()
+            }
+            firstSupport.complete(localSupport)
+            preparation.await()
+
+            assertThat(firstListener.partials).containsExactly("main callback")
+            assertThat(factory.created).hasSize(3)
+            assertThat(factory.created.flatMap { it.downloadRequests }).isEmpty()
+            assertThat(factory.created.all { it.destroyCount == 1 }).isTrue()
+        }
+    }
+
+    @Test
     fun callerCancellationStopsAfterCurrentProbeAndIsRethrown() = runTest {
         val firstSupport = CompletableDeferred<RecognitionSupportSnapshot>()
         val supportStarted = CompletableDeferred<Unit>()
@@ -640,12 +684,44 @@ private class DedicatedSpeechMainThread : SpeechMainThread, AutoCloseable {
         Thread(runnable, threadName)
     }
     private val dispatcher = executor.asCoroutineDispatcher()
+    private val monitor = Any()
+    private var beforeNextBackgroundRun: (() -> Unit)? = null
     val threadIdentity: Int = executor.submit<Int> {
         System.identityHashCode(Thread.currentThread())
     }.get()
 
-    override fun <T> run(block: () -> T): T =
-        if (Thread.currentThread().name == threadName) block() else executor.submit<T>(block).get()
+    fun beforeNextBackgroundRun(action: () -> Unit) {
+        synchronized(monitor) {
+            check(beforeNextBackgroundRun == null)
+            beforeNextBackgroundRun = action
+        }
+    }
+
+    override fun <T> run(block: () -> T): T {
+        if (Thread.currentThread().name == threadName) return block()
+        val interleaving = synchronized(monitor) {
+            beforeNextBackgroundRun.also { beforeNextBackgroundRun = null }
+        }
+        if (interleaving == null) return executor.submit<T>(block).get()
+
+        val mainLifecycleWork = executor.submit(interleaving)
+        val platformWork = executor.submit<T>(block)
+        val result = try {
+            platformWork.get(2, TimeUnit.SECONDS)
+        } catch (exception: TimeoutException) {
+            throw AssertionError(
+                "Blocking main-thread speech work could not pass queued lifecycle work; " +
+                    "the caller still holds the lifecycle lock",
+                exception,
+            )
+        }
+        try {
+            mainLifecycleWork.get()
+        } catch (exception: ExecutionException) {
+            throw exception.cause ?: exception
+        }
+        return result
+    }
 
     override suspend fun <T> runSuspending(block: suspend () -> T): T =
         withContext(dispatcher) { block() }
