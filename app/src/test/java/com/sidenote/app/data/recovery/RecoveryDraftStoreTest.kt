@@ -43,9 +43,56 @@ class RecoveryDraftStoreTest {
         val result = store.load()
 
         assertThat(result).isInstanceOf(RecoveryLoadResult.CorruptDraft::class.java)
+        val corrupt = result as RecoveryLoadResult.CorruptDraft
         assertThat(recoveryFile.exists()).isFalse()
-        assertThat(checkNotNull(recoveryFile.parentFile).listFiles().orEmpty().map(File::getName))
-            .contains("recovery-draft.corrupt.json")
+        assertThat(corrupt.quarantinedFile).isEqualTo(
+            File(checkNotNull(recoveryFile.parentFile), "recovery-draft.corrupt.json"),
+        )
+        assertThat(corrupt.quarantinedFile.exists()).isTrue()
+    }
+
+    @Test
+    fun interruptedAtomicWriteRecoversBackupWhenBaseFileIsMissing() = runTest {
+        val recoveryFile = recoveryFile()
+        val backup = File(recoveryFile.path + ".bak")
+        backup.writeText(
+            """{"text":"recovered","selectionStart":9,"selectionEnd":9,"voiceEnabled":true}""",
+            StandardCharsets.UTF_8,
+        )
+        val store = AtomicFileRecoveryDraftStore(recoveryFile)
+
+        assertThat(store.load()).isEqualTo(
+            RecoveryLoadResult.Draft(
+                RecoveryDraft("recovered", TextRange(9), voiceEnabled = true),
+            ),
+        )
+        assertThat(recoveryFile.exists()).isTrue()
+        assertThat(backup.exists()).isFalse()
+    }
+
+    @Test
+    fun invalidSelectionBoundsAreQuarantinedAsCorruption() = runTest {
+        val recoveryFile = recoveryFile()
+        recoveryFile.writeText(
+            """{"text":"x","selectionStart":2,"selectionEnd":2,"voiceEnabled":true}""",
+            StandardCharsets.UTF_8,
+        )
+
+        val result = AtomicFileRecoveryDraftStore(recoveryFile).load()
+
+        assertThat(result).isInstanceOf(RecoveryLoadResult.CorruptDraft::class.java)
+        assertThat((result as RecoveryLoadResult.CorruptDraft).quarantinedFile.exists()).isTrue()
+    }
+
+    @Test
+    fun readFailureIsReportedWithoutDeletingTheOriginalDraft() = runTest {
+        val recoveryFile = recoveryFile()
+        recoveryFile.mkdirs()
+
+        val result = AtomicFileRecoveryDraftStore(recoveryFile).load()
+
+        assertThat(result).isInstanceOf(RecoveryLoadResult.ReadFailure::class.java)
+        assertThat(recoveryFile.exists()).isTrue()
     }
 
     private fun store(): RecoveryDraftStore = AtomicFileRecoveryDraftStore(recoveryFile())

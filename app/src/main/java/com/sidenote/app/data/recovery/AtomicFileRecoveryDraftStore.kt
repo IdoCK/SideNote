@@ -3,8 +3,11 @@ package com.sidenote.app.data.recovery
 import androidx.compose.ui.text.TextRange
 import androidx.core.util.AtomicFile
 import java.io.File
+import java.io.FileNotFoundException
 import java.io.FileOutputStream
+import java.io.IOException
 import java.nio.charset.StandardCharsets
+import org.json.JSONException
 import org.json.JSONObject
 
 class AtomicFileRecoveryDraftStore(
@@ -13,15 +16,27 @@ class AtomicFileRecoveryDraftStore(
     private val atomicFile = AtomicFile(recoveryFile)
 
     override suspend fun load(): RecoveryLoadResult {
-        if (!recoveryFile.exists()) return RecoveryLoadResult.Empty
-
-        return try {
+        val serialized = try {
             val serialized = atomicFile.openRead().use { input ->
                 input.readBytes().toString(StandardCharsets.UTF_8)
             }
+            serialized
+        } catch (_: FileNotFoundException) {
+            return if (hasNoAtomicFileState()) {
+                RecoveryLoadResult.Empty
+            } else {
+                RecoveryLoadResult.ReadFailure(RecoveryReadError.Unavailable)
+            }
+        } catch (_: IOException) {
+            return RecoveryLoadResult.ReadFailure(RecoveryReadError.Unavailable)
+        }
+
+        return try {
             RecoveryLoadResult.Draft(serialized.toRecoveryDraft())
-        } catch (_: Exception) {
-            RecoveryLoadResult.CorruptDraft(quarantine())
+        } catch (_: JSONException) {
+            corruptResult()
+        } catch (_: IllegalArgumentException) {
+            corruptResult()
         }
     }
 
@@ -41,14 +56,25 @@ class AtomicFileRecoveryDraftStore(
         atomicFile.delete()
     }
 
-    private fun quarantine(): File {
-        val quarantined = File(recoveryFile.parentFile, QUARANTINED_FILE_NAME)
-        quarantined.delete()
-        if (!recoveryFile.renameTo(quarantined)) {
-            atomicFile.delete()
+    private fun corruptResult(): RecoveryLoadResult = quarantine()
+        ?.let(RecoveryLoadResult::CorruptDraft)
+        ?: RecoveryLoadResult.ReadFailure(RecoveryReadError.Unavailable)
+
+    private fun quarantine(): File? {
+        val parent = recoveryFile.parentFile ?: return null
+        var candidate = File(parent, QUARANTINED_FILE_NAME)
+        var suffix = 1
+        while (candidate.exists()) {
+            candidate = File(parent, "recovery-draft.corrupt-$suffix.json")
+            suffix += 1
         }
-        return quarantined
+        return candidate.takeIf(recoveryFile::renameTo)
     }
+
+    private fun hasNoAtomicFileState(): Boolean =
+        !recoveryFile.exists() &&
+            !File(recoveryFile.path + ".new").exists() &&
+            !File(recoveryFile.path + ".bak").exists()
 
     private fun String.toRecoveryDraft(): RecoveryDraft {
         val json = JSONObject(this)

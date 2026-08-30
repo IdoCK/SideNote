@@ -15,6 +15,12 @@ sealed interface RecoveryLoadResult {
     data class Draft(val draft: RecoveryDraft) : RecoveryLoadResult
 
     data class CorruptDraft(val quarantinedFile: File) : RecoveryLoadResult
+
+    data class ReadFailure(val error: RecoveryReadError) : RecoveryLoadResult
+}
+
+enum class RecoveryReadError {
+    Unavailable,
 }
 
 interface RecoveryDraftStore {
