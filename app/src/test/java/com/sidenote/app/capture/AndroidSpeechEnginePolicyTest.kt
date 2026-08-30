@@ -2,9 +2,20 @@ package com.sidenote.app.capture
 
 import android.speech.SpeechRecognizer
 import com.google.common.truth.Truth.assertThat
+import java.util.Collections
+import java.util.concurrent.Executors
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.async
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withContext
 import org.junit.Test
 
+@OptIn(ExperimentalCoroutinesApi::class)
 class AndroidSpeechEnginePolicyTest {
     @Test
     fun localRecoverableFailureRetriesOnlineOnceWhenAllowed() = runTest {
@@ -119,6 +130,65 @@ class AndroidSpeechEnginePolicyTest {
         assertThat(smoother.update(100f)).isWithin(0.0001f).of(0.5f)
         assertThat(smoother.update(-100f)).isWithin(0.0001f).of(0.25f)
         assertThat(smoother.update(Float.NaN)).isWithin(0.0001f).of(0.125f)
+    }
+
+    @Test
+    fun backgroundCaptureLifecycleMarshalsEveryRecognizerOperationToMain() {
+        DedicatedSpeechMainThread().use { mainThread ->
+            val operationThreadIds = Collections.synchronizedList(mutableListOf<Int>())
+            val factory = FakeRecognitionSessionFactory(operationThreadIds = operationThreadIds)
+            val engine = AndroidSpeechEngine(
+                onlineFallbackAllowed = false,
+                sessionFactory = factory,
+                mainThread = mainThread,
+            )
+            val caller = Executors.newSingleThreadExecutor { runnable ->
+                Thread(runnable, "speech-background-caller")
+            }
+
+            try {
+                caller.submit {
+                    engine.start(RecordingSpeechListener())
+                    engine.start(RecordingSpeechListener())
+                    engine.stop()
+                    engine.start(RecordingSpeechListener())
+                    engine.destroy()
+                }.get()
+            } finally {
+                caller.shutdownNow()
+            }
+
+            assertThat(operationThreadIds).isNotEmpty()
+            assertThat(operationThreadIds.toSet()).containsExactly(mainThread.threadIdentity)
+        }
+    }
+
+    @Test
+    fun backgroundSupportAndDownloadsMarshalEveryRecognizerOperationToMain() = runTest {
+        DedicatedSpeechMainThread().use { mainThread ->
+            val operationThreadIds = Collections.synchronizedList(mutableListOf<Int>())
+            val localSupport = RecognitionSupportSnapshot(
+                supportedOnDeviceLanguages = setOf("en-US", "he-IL"),
+                installedOnDeviceLanguages = setOf("en-US"),
+            )
+            val factory = FakeRecognitionSessionFactory(
+                localSupport = localSupport,
+                operationThreadIds = operationThreadIds,
+            )
+            val engine = AndroidSpeechEngine(
+                onlineFallbackAllowed = false,
+                sessionFactory = factory,
+                mainThread = mainThread,
+            )
+
+            withContext(Dispatchers.Default) {
+                engine.support()
+                engine.requestModelDownloads()
+            }
+
+            assertThat(operationThreadIds).isNotEmpty()
+            assertThat(operationThreadIds.toSet()).containsExactly(mainThread.threadIdentity)
+        }
     }
 
     @Test
@@ -247,6 +317,28 @@ class AndroidSpeechEnginePolicyTest {
     }
 
     @Test
+    fun emptyTerminalResultsBecomeNoMatchAndRejectStaleCallbacks() {
+        listOf<String?>(null, "", "   ").forEach { terminalText ->
+            val factory = FakeRecognitionSessionFactory()
+            val engine = AndroidSpeechEngine(
+                onlineFallbackAllowed = false,
+                sessionFactory = factory,
+            )
+            val listener = RecordingSpeechListener()
+
+            engine.start(listener)
+            val local = factory.created.single()
+            local.emitTerminalResult(terminalText)
+            local.emitPartial("stale")
+
+            assertThat(listener.finals).isEmpty()
+            assertThat(listener.failures).containsExactly(SpeechFailure.NoMatch)
+            assertThat(listener.partials).isEmpty()
+            assertThat(local.destroyCount).isEqualTo(1)
+        }
+    }
+
+    @Test
     fun destroyCancelsAndDestroysTheActiveSessionExactlyOnce() {
         val factory = FakeRecognitionSessionFactory()
         val engine = AndroidSpeechEngine(
@@ -285,6 +377,111 @@ class AndroidSpeechEnginePolicyTest {
             .containsExactly("en-US", "he-IL")
             .inOrder()
         assertThat(probe.destroyCount).isEqualTo(1)
+    }
+
+    @Test
+    fun destroyDuringSupportOwnsProbeAndPreventsLaterLanguageOrOnlineChecks() = runTest {
+        val firstSupport = CompletableDeferred<RecognitionSupportSnapshot>()
+        val supportStarted = CompletableDeferred<Unit>()
+        val localSupport = RecognitionSupportSnapshot(
+            supportedOnDeviceLanguages = setOf("en-US"),
+        )
+        val onlineSupport = RecognitionSupportSnapshot(
+            onlineLanguages = setOf("en-US", "he-IL"),
+        )
+        val factory = FakeRecognitionSessionFactory(
+            localSupport = localSupport,
+            onlineSupport = onlineSupport,
+            firstLocalSupport = firstSupport,
+            supportStarted = supportStarted,
+        )
+        val engine = AndroidSpeechEngine(
+            onlineFallbackAllowed = true,
+            sessionFactory = factory,
+        )
+
+        val availability = async { engine.support() }
+        supportStarted.await()
+        val local = factory.created.single()
+        engine.destroy()
+        runCurrent()
+        val completedByDestroy = availability.isCompleted
+        val destroyCountBeforeOldCallback = local.destroyCount
+        firstSupport.complete(localSupport)
+
+        assertThat(availability.await()).isEqualTo(SpeechAvailability.TypedOnly)
+        assertThat(completedByDestroy).isTrue()
+        assertThat(destroyCountBeforeOldCallback).isEqualTo(1)
+        assertThat(local.supportRequests.map { it.languageTag }).containsExactly("en-US")
+        assertThat(factory.created.map { it.attempt }).containsExactly(Attempt.Local)
+        assertThat(local.destroyCount).isEqualTo(1)
+    }
+
+    @Test
+    fun destroyDuringModelSupportPreventsEveryLaterDownloadSideEffect() = runTest {
+        val firstSupport = CompletableDeferred<RecognitionSupportSnapshot>()
+        val supportStarted = CompletableDeferred<Unit>()
+        val localSupport = RecognitionSupportSnapshot(
+            supportedOnDeviceLanguages = setOf("en-US", "he-IL"),
+        )
+        val factory = FakeRecognitionSessionFactory(
+            localSupport = localSupport,
+            firstLocalSupport = firstSupport,
+            supportStarted = supportStarted,
+        )
+        val engine = AndroidSpeechEngine(
+            onlineFallbackAllowed = false,
+            sessionFactory = factory,
+        )
+
+        val preparation = async { engine.requestModelDownloads() }
+        supportStarted.await()
+        val local = factory.created.single()
+        engine.destroy()
+        runCurrent()
+        val completedByDestroy = preparation.isCompleted
+        val destroyCountBeforeOldCallback = local.destroyCount
+        firstSupport.complete(localSupport)
+        preparation.await()
+
+        assertThat(completedByDestroy).isTrue()
+        assertThat(destroyCountBeforeOldCallback).isEqualTo(1)
+        assertThat(local.supportRequests.map { it.languageTag }).containsExactly("en-US")
+        assertThat(local.downloadRequests).isEmpty()
+        assertThat(local.destroyCount).isEqualTo(1)
+    }
+
+    @Test
+    fun callerCancellationStopsAfterCurrentProbeAndIsRethrown() = runTest {
+        val firstSupport = CompletableDeferred<RecognitionSupportSnapshot>()
+        val supportStarted = CompletableDeferred<Unit>()
+        val factory = FakeRecognitionSessionFactory(
+            localSupport = RecognitionSupportSnapshot(
+                supportedOnDeviceLanguages = setOf("en-US", "he-IL"),
+            ),
+            firstLocalSupport = firstSupport,
+            supportStarted = supportStarted,
+        )
+        val engine = AndroidSpeechEngine(
+            onlineFallbackAllowed = false,
+            sessionFactory = factory,
+        )
+
+        val availability = async { engine.support() }
+        supportStarted.await()
+        availability.cancel()
+        var cancellation: CancellationException? = null
+        try {
+            availability.await()
+        } catch (expected: CancellationException) {
+            cancellation = expected
+        }
+
+        val local = factory.created.single()
+        assertThat(cancellation).isNotNull()
+        assertThat(local.supportRequests.map { it.languageTag }).containsExactly("en-US")
+        assertThat(local.destroyCount).isEqualTo(1)
+        assertThat(factory.created.map { it.attempt }).containsExactly(Attempt.Local)
     }
 
     @Test
@@ -357,6 +554,9 @@ class AndroidSpeechEnginePolicyTest {
 private class FakeRecognitionSessionFactory(
     private val localSupport: RecognitionSupportSnapshot = RecognitionSupportSnapshot(),
     private val onlineSupport: RecognitionSupportSnapshot = RecognitionSupportSnapshot(),
+    private val operationThreadIds: MutableList<Int>? = null,
+    private val firstLocalSupport: CompletableDeferred<RecognitionSupportSnapshot>? = null,
+    private val supportStarted: CompletableDeferred<Unit>? = null,
 ) : RecognitionSessionFactory {
     val created = mutableListOf<FakeRecognitionSession>()
 
@@ -364,12 +564,19 @@ private class FakeRecognitionSessionFactory(
         FakeRecognitionSession(
             attempt = attempt,
             support = if (attempt == Attempt.Local) localSupport else onlineSupport,
+            operationThreadIds = operationThreadIds,
+            firstSupport = if (attempt == Attempt.Local) firstLocalSupport else null,
+            supportStarted = if (attempt == Attempt.Local) supportStarted else null,
         ).also(created::add)
+            .also { operationThreadIds?.add(System.identityHashCode(Thread.currentThread())) }
 }
 
 private class FakeRecognitionSession(
     val attempt: Attempt,
     private val support: RecognitionSupportSnapshot,
+    private val operationThreadIds: MutableList<Int>? = null,
+    private val firstSupport: CompletableDeferred<RecognitionSupportSnapshot>? = null,
+    private val supportStarted: CompletableDeferred<Unit>? = null,
 ) : RecognitionSession {
     val supportRequests = mutableListOf<SpeechRequest>()
     val downloadRequests = mutableListOf<SpeechRequest>()
@@ -379,27 +586,37 @@ private class FakeRecognitionSession(
     private var listener: RecognitionSessionListener? = null
 
     override fun start(request: SpeechRequest, listener: RecognitionSessionListener) {
+        operationThreadIds?.add(System.identityHashCode(Thread.currentThread()))
         this.listener = listener
     }
 
     override fun stop() {
+        operationThreadIds?.add(System.identityHashCode(Thread.currentThread()))
         stopCount += 1
     }
 
     override fun cancel() {
+        operationThreadIds?.add(System.identityHashCode(Thread.currentThread()))
         cancelCount += 1
     }
 
     override fun destroy() {
+        operationThreadIds?.add(System.identityHashCode(Thread.currentThread()))
         destroyCount += 1
     }
 
     override suspend fun checkSupport(request: SpeechRequest): RecognitionSupportSnapshot {
+        operationThreadIds?.add(System.identityHashCode(Thread.currentThread()))
         supportRequests += request
+        if (supportRequests.size == 1 && firstSupport != null) {
+            supportStarted?.complete(Unit)
+            return firstSupport.await()
+        }
         return support
     }
 
     override fun requestModelDownload(request: SpeechRequest) {
+        operationThreadIds?.add(System.identityHashCode(Thread.currentThread()))
         downloadRequests += request
     }
 
@@ -407,12 +624,36 @@ private class FakeRecognitionSession(
 
     fun emitFinal(text: String) = listener?.onFinal(text) ?: Unit
 
+    fun emitTerminalResult(text: String?) = listener?.onFinal(text.orEmpty()) ?: Unit
+
     fun emitRms(rmsDb: Float) = listener?.onRmsChanged(rmsDb) ?: Unit
 
     fun emitDetectedLanguage(languageTag: String) =
         listener?.onDetectedLanguage(languageTag) ?: Unit
 
     fun emitFailure(errorCode: Int) = listener?.onError(errorCode) ?: Unit
+}
+
+private class DedicatedSpeechMainThread : SpeechMainThread, AutoCloseable {
+    val threadName = "speech-test-main"
+    private val executor = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, threadName)
+    }
+    private val dispatcher = executor.asCoroutineDispatcher()
+    val threadIdentity: Int = executor.submit<Int> {
+        System.identityHashCode(Thread.currentThread())
+    }.get()
+
+    override fun <T> run(block: () -> T): T =
+        if (Thread.currentThread().name == threadName) block() else executor.submit<T>(block).get()
+
+    override suspend fun <T> runSuspending(block: suspend () -> T): T =
+        withContext(dispatcher) { block() }
+
+    override fun close() {
+        dispatcher.close()
+        executor.shutdownNow()
+    }
 }
 
 private class RecordingSpeechListener : SpeechEngine.Listener {

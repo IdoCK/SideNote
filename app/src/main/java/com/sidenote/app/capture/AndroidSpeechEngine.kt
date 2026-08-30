@@ -3,20 +3,35 @@ package com.sidenote.app.capture
 import android.content.Context
 import android.content.Intent
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.speech.RecognitionListener
 import android.speech.RecognitionSupport
 import android.speech.RecognitionSupportCallback
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import java.util.concurrent.Executor
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.FutureTask
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
+import kotlin.coroutines.CoroutineContext
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
 
 class AndroidSpeechEngine internal constructor(
     private val onlineFallbackAllowed: Boolean,
     private val sessionFactory: RecognitionSessionFactory,
     private val rmsAlpha: Float = DEFAULT_RMS_ALPHA,
+    private val mainThread: SpeechMainThread = DirectSpeechMainThread,
 ) : SpeechEngine {
     constructor(
         context: Context,
@@ -25,11 +40,14 @@ class AndroidSpeechEngine internal constructor(
         onlineFallbackAllowed = onlineFallbackAllowed,
         sessionFactory = AndroidRecognitionSessionFactory(context.applicationContext),
         rmsAlpha = DEFAULT_RMS_ALPHA,
+        mainThread = AndroidSpeechMainThread(),
     )
 
     private val lock = Any()
     private val attemptPolicy = SpeechAttemptPolicy(onlineFallbackAllowed)
     private val requestedDownloads = mutableSetOf<String>()
+    private val probes = mutableSetOf<RecognitionSession>()
+    private val destroyedSignal = CompletableDeferred<Unit>()
     private var active: ActiveSession? = null
     private var listener: SpeechEngine.Listener? = null
     private var generation = 0L
@@ -40,33 +58,51 @@ class AndroidSpeechEngine internal constructor(
         if (isDestroyed()) return SpeechAvailability.TypedOnly
 
         val local = supportedLanguages(Attempt.Local)
+        if (isDestroyed()) return SpeechAvailability.TypedOnly
         if (SpeechSupport.evaluate(local, emptySet(), fallbackAllowed = false) == SpeechAvailability.Available) {
             return SpeechAvailability.Available
         }
 
         val online = if (onlineFallbackAllowed) supportedLanguages(Attempt.Online) else emptySet()
+        if (isDestroyed()) return SpeechAvailability.TypedOnly
         return SpeechSupport.evaluate(local, online, onlineFallbackAllowed)
     }
 
     override suspend fun requestModelDownloads() {
         if (isDestroyed()) return
-        val session = createSessionOrNull(Attempt.Local) ?: return
+        val session = createOwnedProbe(Attempt.Local) ?: return
         try {
             SpeechSupport.requiredLanguages.forEach { languageTag ->
+                currentCoroutineContext().ensureActive()
+                if (!isOwnedProbe(session)) return@forEach
                 val request = SpeechRequest(preferOffline = true, languageTag = languageTag)
-                val support = runCatching { session.checkSupport(request) }.getOrNull()
-                    ?: return@forEach
-                val shouldRequest =
+                val support = checkSupportOrNull(session, request) ?: return@forEach
+                currentCoroutineContext().ensureActive()
+                if (!isOwnedProbe(session)) return@forEach
+                val downloadNeeded =
                     languageTag in support.supportedOnDeviceLanguages &&
                         languageTag !in support.installedOnDeviceLanguages &&
-                        languageTag !in support.pendingOnDeviceLanguages &&
-                        synchronized(lock) { requestedDownloads.add(languageTag) }
-                if (shouldRequest) {
-                    runCatching { session.requestModelDownload(request) }
+                        languageTag !in support.pendingOnDeviceLanguages
+                if (downloadNeeded) {
+                    try {
+                        synchronized(lock) {
+                            if (
+                                !destroyed &&
+                                session in probes &&
+                                requestedDownloads.add(languageTag)
+                            ) {
+                                mainThread.run { session.requestModelDownload(request) }
+                            }
+                        }
+                    } catch (exception: CancellationException) {
+                        throw exception
+                    } catch (_: Exception) {
+                        // The explicit onboarding caller may retry preparation with a new engine.
+                    }
                 }
             }
         } finally {
-            destroySession(session)
+            releaseProbe(session)
         }
     }
 
@@ -98,39 +134,48 @@ class AndroidSpeechEngine internal constructor(
     }
 
     override fun destroy() {
-        val session = synchronized(lock) {
+        val sessions = synchronized(lock) {
             if (destroyed) return
             destroyed = true
             generation += 1
             listener = null
-            active?.session.also { active = null }
+            buildList {
+                active?.session?.let(::add)
+                addAll(probes)
+            }.distinct().also {
+                active = null
+                probes.clear()
+            }
         }
-        session?.let(::cancelAndDestroySession)
+        destroyedSignal.complete(Unit)
+        sessions.forEach(::cancelAndDestroySession)
     }
 
     private suspend fun supportedLanguages(attempt: Attempt): Set<String> {
-        val session = createSessionOrNull(attempt) ?: return emptySet()
+        val session = createOwnedProbe(attempt) ?: return emptySet()
         return try {
-            buildSet {
-                SpeechSupport.requiredLanguages.forEach { languageTag ->
-                    val support = runCatching {
-                        session.checkSupport(
-                            SpeechRequest(
-                                preferOffline = attempt == Attempt.Local,
-                                languageTag = languageTag,
-                            ),
-                        )
-                    }.getOrNull() ?: return@forEach
-                    val pathLanguages = if (attempt == Attempt.Local) {
-                        support.supportedOnDeviceLanguages
-                    } else {
-                        support.onlineLanguages
-                    }
-                    if (languageTag in pathLanguages) add(languageTag)
+            val supported = mutableSetOf<String>()
+            for (languageTag in SpeechSupport.requiredLanguages) {
+                currentCoroutineContext().ensureActive()
+                if (!isOwnedProbe(session)) break
+                val support = checkSupportOrNull(
+                    session,
+                    SpeechRequest(
+                        preferOffline = attempt == Attempt.Local,
+                        languageTag = languageTag,
+                    ),
+                ) ?: continue
+                if (!isOwnedProbe(session)) break
+                val pathLanguages = if (attempt == Attempt.Local) {
+                    support.supportedOnDeviceLanguages
+                } else {
+                    support.onlineLanguages
                 }
+                if (languageTag in pathLanguages) supported += languageTag
             }
+            supported
         } finally {
-            destroySession(session)
+            releaseProbe(session)
         }
     }
 
@@ -161,12 +206,16 @@ class AndroidSpeechEngine internal constructor(
         }
 
         val callbacks = callbacksFor(currentGeneration, activeSession)
-        runCatching {
-            session.start(
-                SpeechRequest(preferOffline = attempt == Attempt.Local),
-                callbacks,
-            )
-        }.onFailure {
+        try {
+            mainThread.run {
+                session.start(
+                    SpeechRequest(preferOffline = attempt == Attempt.Local),
+                    callbacks,
+                )
+            }
+        } catch (exception: CancellationException) {
+            throw exception
+        } catch (_: Exception) {
             finishUnavailableSession(
                 currentGeneration = currentGeneration,
                 attempt = attempt,
@@ -185,6 +234,15 @@ class AndroidSpeechEngine internal constructor(
         }
 
         override fun onFinal(text: String) {
+            if (text.isBlank()) {
+                finishUnavailableSession(
+                    currentGeneration = currentGeneration,
+                    attempt = activeSession.attempt,
+                    session = activeSession.session,
+                    failure = SpeechFailure.NoMatch,
+                )
+                return
+            }
             val currentListener = synchronized(lock) {
                 if (!isCurrent(currentGeneration, activeSession.session)) return
                 active = null
@@ -257,20 +315,84 @@ class AndroidSpeechEngine internal constructor(
     private fun isDestroyed(): Boolean = synchronized(lock) { destroyed }
 
     private fun createSessionOrNull(attempt: Attempt): RecognitionSession? =
-        runCatching { sessionFactory.create(attempt) }.getOrNull()
+        try {
+            mainThread.run { sessionFactory.create(attempt) }
+        } catch (exception: CancellationException) {
+            throw exception
+        } catch (_: Exception) {
+            null
+        }
+
+    private fun createOwnedProbe(attempt: Attempt): RecognitionSession? {
+        val session = createSessionOrNull(attempt) ?: return null
+        val accepted = synchronized(lock) {
+            if (destroyed) false else probes.add(session)
+        }
+        if (!accepted) {
+            destroySession(session)
+            return null
+        }
+        return session
+    }
+
+    private fun isOwnedProbe(session: RecognitionSession): Boolean = synchronized(lock) {
+        !destroyed && session in probes
+    }
+
+    private fun releaseProbe(session: RecognitionSession) {
+        val owned = synchronized(lock) { probes.remove(session) }
+        if (owned) destroySession(session)
+    }
+
+    private suspend fun checkSupportOrNull(
+        session: RecognitionSession,
+        request: SpeechRequest,
+    ): RecognitionSupportSnapshot? = try {
+        coroutineScope {
+            val check = async {
+                mainThread.runSuspending { session.checkSupport(request) }
+            }
+            select {
+                check.onAwait { it }
+                destroyedSignal.onAwait {
+                    throw EngineDestroyedException()
+                }
+            }
+        }
+    } catch (exception: CancellationException) {
+        throw exception
+    } catch (_: Exception) {
+        null
+    }
 
     private fun stopAndDestroySession(session: RecognitionSession) {
-        runCatching { session.stop() }
-        destroySession(session)
+        try {
+            ignorePlatformFailure { mainThread.run { session.stop() } }
+        } finally {
+            destroySession(session)
+        }
     }
 
     private fun cancelAndDestroySession(session: RecognitionSession) {
-        runCatching { session.cancel() }
-        destroySession(session)
+        try {
+            ignorePlatformFailure { mainThread.run { session.cancel() } }
+        } finally {
+            destroySession(session)
+        }
     }
 
     private fun destroySession(session: RecognitionSession) {
-        runCatching { session.destroy() }
+        ignorePlatformFailure { mainThread.run { session.destroy() } }
+    }
+
+    private inline fun ignorePlatformFailure(block: () -> Unit) {
+        try {
+            block()
+        } catch (exception: CancellationException) {
+            throw exception
+        } catch (_: Exception) {
+            // Session state is already detached; no further platform cleanup is available.
+        }
     }
 
     private data class ActiveSession(
@@ -288,6 +410,8 @@ class AndroidSpeechEngine internal constructor(
     }
 }
 
+private class EngineDestroyedException : IllegalStateException("Speech engine destroyed")
+
 internal data class SpeechRequest(
     val preferOffline: Boolean,
     val languageTag: String? = null,
@@ -299,6 +423,49 @@ internal data class RecognitionSupportSnapshot(
     val pendingOnDeviceLanguages: Set<String> = emptySet(),
     val onlineLanguages: Set<String> = emptySet(),
 )
+
+internal interface SpeechMainThread {
+    fun <T> run(block: () -> T): T
+
+    suspend fun <T> runSuspending(block: suspend () -> T): T
+}
+
+internal class AndroidSpeechMainThread(
+    private val handler: Handler = Handler(Looper.getMainLooper()),
+) : SpeechMainThread {
+    private val dispatcher = object : CoroutineDispatcher() {
+        override fun isDispatchNeeded(context: CoroutineContext): Boolean =
+            Looper.myLooper() != handler.looper
+
+        override fun dispatch(context: CoroutineContext, block: Runnable) {
+            check(handler.post(block)) { "Android main looper rejected speech work" }
+        }
+    }
+
+    override fun <T> run(block: () -> T): T {
+        if (Looper.myLooper() == handler.looper) return block()
+        val task = FutureTask(block)
+        check(handler.post(task)) { "Android main looper rejected speech work" }
+        return try {
+            task.get()
+        } catch (exception: ExecutionException) {
+            throw exception.cause ?: exception
+        } catch (exception: InterruptedException) {
+            Thread.currentThread().interrupt()
+            throw exception
+        }
+    }
+
+    override suspend fun <T> runSuspending(block: suspend () -> T): T {
+        return withContext(dispatcher) { block() }
+    }
+}
+
+private object DirectSpeechMainThread : SpeechMainThread {
+    override fun <T> run(block: () -> T): T = block()
+
+    override suspend fun <T> runSuspending(block: suspend () -> T): T = block()
+}
 
 internal fun interface RecognitionSessionFactory {
     fun create(attempt: Attempt): RecognitionSession
@@ -350,6 +517,12 @@ internal object SpeechIntentFactory {
             }
         }
 }
+
+internal fun terminalRecognitionText(results: Bundle?): String =
+    results
+        ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+        ?.firstOrNull()
+        .orEmpty()
 
 internal fun speechFailureForAndroidError(errorCode: Int): SpeechFailure =
     when (errorCode) {
@@ -420,11 +593,13 @@ private class AndroidRecognitionSession(
                 }
 
                 override fun onResults(results: Bundle?) {
-                    firstResult(results)?.let { text -> listener?.onFinal(text) }
+                    listener?.onFinal(terminalRecognitionText(results))
                 }
 
                 override fun onPartialResults(partialResults: Bundle?) {
-                    firstResult(partialResults)?.let { text -> listener?.onPartial(text) }
+                    terminalRecognitionText(partialResults)
+                        .takeIf(String::isNotBlank)
+                        ?.let { text -> listener?.onPartial(text) }
                 }
 
                 override fun onEvent(eventType: Int, params: Bundle?) = Unit
@@ -480,11 +655,6 @@ private class AndroidRecognitionSession(
         recognizer.triggerModelDownload(SpeechIntentFactory.create(request))
     }
 
-    private fun firstResult(results: Bundle?): String? =
-        results
-            ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-            ?.firstOrNull()
-            ?.takeIf(String::isNotBlank)
 }
 
 private fun RecognitionSupport.toSnapshot(): RecognitionSupportSnapshot =

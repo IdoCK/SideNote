@@ -1,13 +1,52 @@
 package com.sidenote.app.capture
 
 import android.speech.RecognizerIntent
+import android.os.Looper
+import android.os.Bundle
+import android.speech.SpeechRecognizer
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.google.common.truth.Truth.assertThat
+import java.util.concurrent.Executors
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import org.junit.Test
 import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class SpeechIntentTest {
+    @Test
+    fun nullEmptyAndBlankRecognitionBundlesStillProduceTerminalSignals() {
+        val empty = Bundle()
+        val blank = Bundle().apply {
+            putStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION, arrayListOf("   "))
+        }
+
+        assertThat(terminalRecognitionText(null)).isEmpty()
+        assertThat(terminalRecognitionText(empty)).isEmpty()
+        assertThat(terminalRecognitionText(blank)).isEqualTo("   ")
+    }
+
+    @Test
+    fun androidMainThreadBoundaryMarshalsBackgroundSyncAndSuspendWork() = runBlocking {
+        val mainThread = AndroidSpeechMainThread()
+        val background = Executors.newSingleThreadExecutor()
+
+        try {
+            val synchronousWasMain = background.submit<Boolean> {
+                mainThread.run { Looper.myLooper() == Looper.getMainLooper() }
+            }.get()
+            val suspendingWasMain = withContext(Dispatchers.Default) {
+                mainThread.runSuspending { Looper.myLooper() == Looper.getMainLooper() }
+            }
+
+            assertThat(synchronousWasMain).isTrue()
+            assertThat(suspendingWasMain).isTrue()
+        } finally {
+            background.shutdownNow()
+        }
+    }
+
     @Test
     fun localIntentCarriesTheExactAutomaticBilingualRecognitionContract() {
         val intent = SpeechIntentFactory.create(SpeechRequest(preferOffline = true))
