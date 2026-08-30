@@ -24,6 +24,7 @@ import kotlin.time.Duration.Companion.milliseconds
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -45,6 +46,7 @@ data class CaptureDependencies(
     val clock: Clock,
     val zone: ZoneId,
     val ioDispatcher: CoroutineDispatcher,
+    val stopScope: CoroutineScope,
 )
 
 class CaptureViewModel(
@@ -135,7 +137,6 @@ class CaptureViewModel(
                     currentCoordinator.state.collect { latest -> mutableState.value = latest }
                 }
                 coordinatorReady.complete(currentCoordinator)
-                if (captureActive) startSpeechIfEligible(currentCoordinator)
             } catch (error: CancellationException) {
                 coordinatorReady.cancel(error)
                 throw error
@@ -162,7 +163,7 @@ class CaptureViewModel(
     fun onCaptureStopped(completeIfBackgrounded: Boolean) {
         captureActive = false
         speech?.stop()
-        viewModelScope.launch {
+        dependencies.stopScope.launch {
             val currentCoordinator = awaitCoordinator() ?: return@launch
             eventMutex.withLock {
                 if (terminalCompletion) return@withLock

@@ -23,7 +23,9 @@ import java.io.File
 import java.time.Clock
 import java.time.Instant
 import java.time.ZoneId
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -47,6 +49,7 @@ class ProductionAppContainer(
         context = appContext,
         settings = settingsRepository,
     )
+    private val captureStopScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     override fun captureDependencies(): CaptureDependencies = CaptureDependencies(
         settings = settingsRepository,
@@ -59,6 +62,7 @@ class ProductionAppContainer(
         clock = Clock.systemUTC(),
         zone = ZoneId.systemDefault(),
         ioDispatcher = Dispatchers.IO,
+        stopScope = captureStopScope,
     )
 }
 

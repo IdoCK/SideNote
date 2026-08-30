@@ -54,7 +54,7 @@ class AndroidCompletionSignalSource(
             appContext.registerReceiver(
                 receiver,
                 IntentFilter(Intent.ACTION_SCREEN_OFF),
-                Context.RECEIVER_EXPORTED,
+                Context.RECEIVER_NOT_EXPORTED,
             )
             receiverRegistered = true
             sensorManager?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)?.let { accelerometer ->

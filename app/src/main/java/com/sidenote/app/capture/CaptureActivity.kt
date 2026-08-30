@@ -5,6 +5,7 @@ import android.os.Bundle
 import android.view.HapticFeedbackConstants
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.Surface
@@ -24,6 +25,11 @@ class CaptureActivity : ComponentActivity() {
     private val viewModel: CaptureViewModel by viewModels {
         val container = (application as SideNoteApplication).container
         CaptureViewModel.Factory(container.captureDependencies())
+    }
+    private val externalSetupLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) {
+        viewModel.armBackgroundCompletionAfterSetup()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -62,6 +68,16 @@ class CaptureActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         viewModel.complete(CompletionSignal.RepeatedLaunch)
+    }
+
+    fun launchExternalSetup(intent: Intent) {
+        viewModel.disarmBackgroundCompletionForSetup()
+        try {
+            externalSetupLauncher.launch(intent)
+        } catch (error: Exception) {
+            viewModel.armBackgroundCompletionAfterSetup()
+            throw error
+        }
     }
 
     override fun onStart() {

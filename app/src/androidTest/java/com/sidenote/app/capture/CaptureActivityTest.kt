@@ -4,19 +4,22 @@ import android.app.KeyguardManager
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.Looper
 import android.os.ParcelFileDescriptor
 import android.os.SystemClock
 import androidx.compose.ui.test.junit4.v2.createEmptyComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.text.TextRange
+import androidx.lifecycle.Lifecycle
 import androidx.test.core.app.ActivityScenario
 import androidx.test.core.app.ApplicationProvider
+import androidx.test.espresso.Espresso
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
-import androidx.lifecycle.Lifecycle
 import com.google.common.truth.Truth.assertThat
 import com.sidenote.app.AppContainer
+import com.sidenote.app.MainActivity
 import com.sidenote.app.SideNoteApplication
 import com.sidenote.app.data.documents.AppendResult
 import com.sidenote.app.data.documents.DocumentRepository
@@ -32,10 +35,18 @@ import java.time.Clock
 import java.time.Instant
 import java.time.ZoneId
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.onCompletion
+import kotlinx.coroutines.flow.onStart
 import org.junit.After
 import org.junit.Before
 import org.junit.Rule
@@ -65,6 +76,7 @@ class CaptureActivityTest {
     @After
     fun restoreApplicationAndDevice() {
         scenario?.close()
+        container.close()
         application.installContainerForTesting(originalContainer)
         executeShellCommand("input keyevent KEYCODE_WAKEUP")
         executeShellCommand("wm dismiss-keyguard")
@@ -103,6 +115,83 @@ class CaptureActivityTest {
     }
 
     @Test
+    fun voiceEnabledSessionStartsOnceAndNeverRestartsWhileSavingOrTerminal() {
+        container.enableVoice()
+        val suspendedLoad = container.recovery.suspendNextLoad()
+        val suspendedAppend = container.repository.suspendNextAppend()
+        launchCapture()
+
+        compose.waitUntil(timeoutMillis = 5_000) { suspendedLoad.started.isCompleted }
+        suspendedLoad.release.complete(Unit)
+        compose.waitUntil(timeoutMillis = 5_000) {
+            container.speechEngine.startCalls.get() >= 1
+        }
+        compose.waitForIdle()
+        assertThat(container.speechEngine.startCalls.get()).isEqualTo(1)
+
+        assertThat(container.completionSignals.simulate(Intent.ACTION_SCREEN_OFF)).isTrue()
+        compose.waitUntil(timeoutMillis = 5_000) { suspendedAppend.started.isCompleted }
+        scenario?.moveToState(Lifecycle.State.CREATED)
+        scenario?.moveToState(Lifecycle.State.RESUMED)
+
+        assertThat(container.speechEngine.startCalls.get()).isEqualTo(1)
+        suspendedAppend.release.complete(Unit)
+        compose.waitUntil(timeoutMillis = 5_000) {
+            container.events.lastOrNull() == "clear"
+        }
+        compose.waitForIdle()
+        assertThat(container.speechEngine.startCalls.get()).isEqualTo(1)
+    }
+
+    @Test
+    fun finishingStopFlushSurvivesViewModelClearing() {
+        val suspendedSave = container.recovery.suspendNextSave()
+        launchCapture()
+
+        scenario?.onActivity(CaptureActivity::finish)
+
+        compose.waitUntil(timeoutMillis = 5_000) { suspendedSave.started.isCompleted }
+        assertThat(suspendedSave.cancelled.isCompleted).isFalse()
+        suspendedSave.release.complete(Unit)
+        compose.waitUntil(timeoutMillis = 5_000) { suspendedSave.completed.isCompleted }
+        assertThat(container.repository.appends).isEmpty()
+        assertThat(container.events).doesNotContain("clear")
+        assertThat(container.recovery.mainThreadCalls.get()).isEqualTo(0)
+    }
+
+    @Test
+    fun externalSetupRoundTripSuppressesBackgroundSaveThenRearms() {
+        launchCapture()
+
+        scenario?.onActivity { activity ->
+            activity.launchExternalSetup(Intent(activity, MainActivity::class.java))
+        }
+
+        compose.waitUntil(timeoutMillis = 5_000) {
+            scenario?.state == Lifecycle.State.CREATED &&
+                container.events.contains("save") &&
+                container.completionSignals.activeCollectors.get() == 0
+        }
+        assertThat(container.repository.appends).isEmpty()
+
+        Espresso.pressBack()
+        compose.waitUntil(timeoutMillis = 5_000) {
+            scenario?.state == Lifecycle.State.RESUMED &&
+                container.completionSignals.activeCollectors.get() == 1
+        }
+        compose.waitForIdle()
+        scenario?.moveToState(Lifecycle.State.CREATED)
+
+        compose.waitUntil(timeoutMillis = 5_000) {
+            container.repository.appends.size == 1
+        }
+        compose.waitUntil(timeoutMillis = 5_000) {
+            container.completionSignals.activeCollectors.get() == 0
+        }
+        assertThat(container.repository.appends).containsExactly("captured thought")
+    }
+
+    @Test
     fun setupBackgroundFlushesRecoveryWithoutCompleting() {
         container.markSetupIncomplete()
         launchCapture()
@@ -110,10 +199,12 @@ class CaptureActivityTest {
         scenario?.moveToState(Lifecycle.State.CREATED)
 
         compose.waitUntil(timeoutMillis = 5_000) {
-            container.events.lastOrNull() == "save"
+            container.events.lastOrNull() == "save" &&
+                container.completionSignals.activeCollectors.get() == 0
         }
         assertThat(container.events).containsExactly("load", "save").inOrder()
         assertThat(container.repository.appends).isEmpty()
+        assertThat(container.recovery.mainThreadCalls.get()).isEqualTo(0)
     }
 
     @Test
@@ -128,7 +219,16 @@ class CaptureActivityTest {
         launchCapture()
 
         waitUntil(timeoutMillis = 5_000) { keyguardManager().isKeyguardLocked }
-        listOf("Review", "Settings", "Date", "Project", "History").forEach { privateLabel ->
+        listOf(
+            "Review",
+            "Settings",
+            "Date",
+            "Project",
+            "Folder",
+            "Existing note",
+            "Previous day",
+            "History",
+        ).forEach { privateLabel ->
             compose.onNodeWithText(privateLabel, substring = true).assertDoesNotExist()
             compose.onNodeWithContentDescription(privateLabel, substring = true).assertDoesNotExist()
         }
@@ -140,6 +240,9 @@ class CaptureActivityTest {
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
         )
         compose.waitForIdle()
+        compose.waitUntil(timeoutMillis = 5_000) {
+            container.completionSignals.activeCollectors.get() == 1
+        }
     }
 
     private fun keyguardManager(): KeyguardManager =
@@ -155,6 +258,8 @@ class CaptureActivityTest {
             "append",
             "clear",
         ).inOrder()
+        assertThat(container.recovery.mainThreadCalls.get()).isEqualTo(0)
+        assertThat(container.repository.mainThreadCalls.get()).isEqualTo(0)
     }
 
     private fun executeShellCommand(command: String) {
@@ -183,8 +288,14 @@ private class FakeCaptureAppContainer : AppContainer {
     val events = CopyOnWriteArrayList<String>()
     val repository = RecordingCaptureRepository(events)
     val completionSignals = FakeCompletionSignals()
-    private val recovery = FakeRecoveryDraftStore(events)
+    val recovery = FakeRecoveryDraftStore(events)
     private val settings = FakeSettingsRepository()
+    val speechEngine = FakeSpeechEngine()
+    private val stopScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    fun enableVoice() {
+        recovery.draft = recovery.draft.copy(voiceEnabled = true)
+    }
 
     fun markSetupIncomplete() {
         settings.settings.value = settings.settings.value.copy(
@@ -193,24 +304,32 @@ private class FakeCaptureAppContainer : AppContainer {
         )
     }
 
+    fun close() {
+        stopScope.cancel()
+    }
+
     override fun captureDependencies(): CaptureDependencies = CaptureDependencies(
         settings = settings,
         recovery = recovery,
         repository = repository,
-        speechFactory = { FakeSpeechEngine() },
+        speechFactory = { speechEngine },
         completionSignals = completionSignals.signals,
         clock = Clock.fixed(
             Instant.parse("2026-08-30T17:00:00Z"),
             ZoneId.of("America/New_York"),
         ),
         zone = ZoneId.of("America/New_York"),
-        ioDispatcher = Dispatchers.Unconfined,
+        ioDispatcher = Dispatchers.IO,
+        stopScope = stopScope,
     )
 }
 
 private class FakeCompletionSignals {
     private val mutableSignals = MutableSharedFlow<CompletionSignal>(extraBufferCapacity = 4)
+    val activeCollectors = AtomicInteger()
     val signals: Flow<CompletionSignal> = mutableSignals
+        .onStart { activeCollectors.incrementAndGet() }
+        .onCompletion { activeCollectors.decrementAndGet() }
 
     fun simulate(action: String): Boolean =
         action == Intent.ACTION_SCREEN_OFF && mutableSignals.tryEmit(CompletionSignal.ScreenOff)
@@ -237,23 +356,67 @@ private class FakeSettingsRepository : SettingsRepository {
 private class FakeRecoveryDraftStore(
     private val events: MutableList<String>,
 ) : RecoveryDraftStore {
+    val mainThreadCalls = AtomicInteger()
+    var draft = RecoveryDraft(
+        text = "captured thought",
+        selection = TextRange(16),
+        voiceEnabled = false,
+    )
+    @Volatile private var suspendedSave: SuspendedTestOperation? = null
+    @Volatile private var suspendedLoad: SuspendedTestOperation? = null
+
+    fun suspendNextLoad(): SuspendedTestOperation = SuspendedTestOperation().also {
+        suspendedLoad = it
+    }
+
+    fun suspendNextSave(): SuspendedTestOperation = SuspendedTestOperation().also {
+        suspendedSave = it
+    }
+
     override suspend fun load(): RecoveryLoadResult {
+        recordCallingThread()
         events += "load"
-        return RecoveryLoadResult.Draft(
-            RecoveryDraft(
-                text = "captured thought",
-                selection = TextRange(16),
-                voiceEnabled = false,
-            ),
-        )
+        suspendedLoad?.let { suspension ->
+            suspension.started.complete(Unit)
+            try {
+                suspension.release.await()
+                suspension.completed.complete(Unit)
+            } catch (error: CancellationException) {
+                suspension.cancelled.complete(Unit)
+                throw error
+            } finally {
+                suspendedLoad = null
+            }
+        }
+        return RecoveryLoadResult.Draft(draft)
     }
 
     override suspend fun save(draft: RecoveryDraft) {
+        recordCallingThread()
+        suspendedSave?.let { suspension ->
+            suspension.started.complete(Unit)
+            try {
+                suspension.release.await()
+                suspension.completed.complete(Unit)
+            } catch (error: CancellationException) {
+                suspension.cancelled.complete(Unit)
+                throw error
+            } finally {
+                suspendedSave = null
+            }
+        }
         events += "save"
     }
 
     override suspend fun clear() {
+        recordCallingThread()
         events += "clear"
+    }
+
+    private fun recordCallingThread() {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            mainThreadCalls.incrementAndGet()
+        }
     }
 }
 
@@ -261,10 +424,31 @@ private class RecordingCaptureRepository(
     private val events: MutableList<String>,
 ) : DocumentRepository {
     val appends = CopyOnWriteArrayList<String>()
+    val mainThreadCalls = AtomicInteger()
+    @Volatile private var suspendedAppend: SuspendedTestOperation? = null
+
+    fun suspendNextAppend(): SuspendedTestOperation = SuspendedTestOperation().also {
+        suspendedAppend = it
+    }
 
     override suspend fun append(text: String, committedAt: Instant, zone: ZoneId): AppendResult {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            mainThreadCalls.incrementAndGet()
+        }
         events += "append"
         appends += text
+        suspendedAppend?.let { suspension ->
+            suspension.started.complete(Unit)
+            try {
+                suspension.release.await()
+                suspension.completed.complete(Unit)
+            } catch (error: CancellationException) {
+                suspension.cancelled.complete(Unit)
+                throw error
+            } finally {
+                suspendedAppend = null
+            }
+        }
         return AppendResult.Success
     }
 
@@ -281,13 +465,24 @@ private class RecordingCaptureRepository(
 }
 
 private class FakeSpeechEngine : SpeechEngine {
+    val startCalls = AtomicInteger()
+
     override suspend fun support(): SpeechAvailability = SpeechAvailability.Available
 
     override suspend fun requestModelDownloads() = Unit
 
-    override fun start(listener: SpeechEngine.Listener) = Unit
+    override fun start(listener: SpeechEngine.Listener) {
+        startCalls.incrementAndGet()
+    }
 
     override fun stop() = Unit
 
     override fun destroy() = Unit
+}
+
+private class SuspendedTestOperation {
+    val started = CompletableDeferred<Unit>()
+    val release = CompletableDeferred<Unit>()
+    val completed = CompletableDeferred<Unit>()
+    val cancelled = CompletableDeferred<Unit>()
 }
