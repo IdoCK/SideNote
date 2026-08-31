@@ -14,9 +14,10 @@ import androidx.compose.ui.text.TextRange
 import androidx.lifecycle.Lifecycle
 import androidx.test.core.app.ActivityScenario
 import androidx.test.core.app.ApplicationProvider
-import androidx.test.espresso.Espresso
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import androidx.test.runner.lifecycle.ActivityLifecycleMonitorRegistry
+import androidx.test.runner.lifecycle.Stage
 import com.google.common.truth.Truth.assertThat
 import com.sidenote.app.AppContainer
 import com.sidenote.app.MainActivity
@@ -144,6 +145,54 @@ class CaptureActivityTest {
     }
 
     @Test
+    fun startStopStartBeforeReadinessKeepsOnlyLatestSpeechStartupWaiter() {
+        container.enableVoice()
+        container.markSetupIncomplete()
+        val suspendedLoad = container.recovery.suspendNextLoad()
+        launchCapture()
+
+        compose.waitUntil(timeoutMillis = 5_000) { suspendedLoad.started.isCompleted }
+        scenario?.moveToState(Lifecycle.State.CREATED)
+        compose.waitUntil(timeoutMillis = 5_000) {
+            container.completionSignals.activeCollectors.get() == 0
+        }
+        scenario?.moveToState(Lifecycle.State.RESUMED)
+        compose.waitUntil(timeoutMillis = 5_000) {
+            container.completionSignals.activeCollectors.get() == 1
+        }
+
+        suspendedLoad.release.complete(Unit)
+        compose.waitUntil(timeoutMillis = 5_000) {
+            container.speechFactoryCalls.get() == 1 &&
+                container.speechEngine.startCalls.get() >= 1
+        }
+        compose.waitForIdle()
+
+        assertThat(container.speechEngine.startCalls.get()).isEqualTo(1)
+    }
+
+    @Test
+    fun stoppedBeforeReadinessNeverStartsSpeech() {
+        container.enableVoice()
+        container.markSetupIncomplete()
+        val suspendedLoad = container.recovery.suspendNextLoad()
+        launchCapture()
+
+        compose.waitUntil(timeoutMillis = 5_000) { suspendedLoad.started.isCompleted }
+        scenario?.moveToState(Lifecycle.State.CREATED)
+        compose.waitUntil(timeoutMillis = 5_000) {
+            container.completionSignals.activeCollectors.get() == 0
+        }
+        suspendedLoad.release.complete(Unit)
+        compose.waitUntil(timeoutMillis = 5_000) {
+            container.speechFactoryCalls.get() == 1
+        }
+        compose.waitForIdle()
+
+        assertThat(container.speechEngine.startCalls.get()).isEqualTo(0)
+    }
+
+    @Test
     fun finishingStopFlushSurvivesViewModelClearing() {
         val suspendedSave = container.recovery.suspendNextSave()
         launchCapture()
@@ -164,7 +213,9 @@ class CaptureActivityTest {
         launchCapture()
 
         scenario?.onActivity { activity ->
-            activity.launchExternalSetup(Intent(activity, MainActivity::class.java))
+            assertThat(
+                activity.launchExternalSetup(Intent(activity, MainActivity::class.java)),
+            ).isTrue()
         }
 
         compose.waitUntil(timeoutMillis = 5_000) {
@@ -174,11 +225,8 @@ class CaptureActivityTest {
         }
         assertThat(container.repository.appends).isEmpty()
 
-        Espresso.pressBack()
-        compose.waitUntil(timeoutMillis = 5_000) {
-            scenario?.state == Lifecycle.State.RESUMED &&
-                container.completionSignals.activeCollectors.get() == 1
-        }
+        finishExternalSetup()
+        waitForCaptureResumed()
         compose.waitForIdle()
         scenario?.moveToState(Lifecycle.State.CREATED)
 
@@ -189,6 +237,32 @@ class CaptureActivityTest {
             container.completionSignals.activeCollectors.get() == 0
         }
         assertThat(container.repository.appends).containsExactly("captured thought")
+    }
+
+    @Test
+    fun doubleExternalSetupLaunchRejectsSecondWithoutRearmingFirst() {
+        launchCapture()
+
+        scenario?.onActivity { activity ->
+            assertThat(
+                activity.launchExternalSetup(Intent(activity, MainActivity::class.java)),
+            ).isTrue()
+            val missingDestination = Intent().setClassName(
+                activity,
+                "com.sidenote.app.missing.MissingSetupActivity",
+            )
+            assertThat(activity.launchExternalSetup(missingDestination)).isFalse()
+        }
+
+        compose.waitUntil(timeoutMillis = 5_000) {
+            scenario?.state == Lifecycle.State.CREATED &&
+                container.events.contains("save") &&
+                container.completionSignals.activeCollectors.get() == 0
+        }
+        assertThat(container.repository.appends).isEmpty()
+
+        finishExternalSetup()
+        waitForCaptureResumed()
     }
 
     @Test
@@ -248,6 +322,43 @@ class CaptureActivityTest {
     private fun keyguardManager(): KeyguardManager =
         targetContext.getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
 
+    private fun isExternalSetupResumed(): Boolean {
+        var resumed = false
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            resumed = ActivityLifecycleMonitorRegistry.getInstance()
+                .getActivitiesInStage(Stage.RESUMED)
+                .any { activity -> activity is MainActivity }
+        }
+        return resumed
+    }
+
+    private fun finishExternalSetup() {
+        waitUntil(timeoutMillis = 5_000, condition = ::isExternalSetupResumed)
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            val externalSetup = ActivityLifecycleMonitorRegistry.getInstance()
+                .getActivitiesInStage(Stage.RESUMED)
+                .filterIsInstance<MainActivity>()
+                .single()
+            externalSetup.finish()
+        }
+    }
+
+    private fun waitForCaptureResumed() {
+        val deadline = SystemClock.uptimeMillis() + 5_000
+        while (
+            (captureScenarioState() != Lifecycle.State.RESUMED ||
+                container.completionSignals.activeCollectors.get() != 1) &&
+            SystemClock.uptimeMillis() < deadline
+        ) {
+            SystemClock.sleep(50)
+        }
+        assertThat(captureScenarioState()).isEqualTo(Lifecycle.State.RESUMED)
+        assertThat(container.completionSignals.activeCollectors.get()).isEqualTo(1)
+    }
+
+    private fun captureScenarioState(): Lifecycle.State? =
+        runCatching { scenario?.state }.getOrNull()
+
     private fun assertRecoveryFlushAppendAndClearOrder() {
         compose.waitUntil(timeoutMillis = 5_000) {
             container.events.lastOrNull() == "clear"
@@ -291,7 +402,9 @@ private class FakeCaptureAppContainer : AppContainer {
     val recovery = FakeRecoveryDraftStore(events)
     private val settings = FakeSettingsRepository()
     val speechEngine = FakeSpeechEngine()
-    private val stopScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    val speechFactoryCalls = AtomicInteger()
+    private val processScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val recoveryHandoff = CaptureRecoveryHandoff(recovery, processScope)
 
     fun enableVoice() {
         recovery.draft = recovery.draft.copy(voiceEnabled = true)
@@ -305,14 +418,16 @@ private class FakeCaptureAppContainer : AppContainer {
     }
 
     fun close() {
-        stopScope.cancel()
+        processScope.cancel()
     }
 
     override fun captureDependencies(): CaptureDependencies = CaptureDependencies(
         settings = settings,
-        recovery = recovery,
         repository = repository,
-        speechFactory = { speechEngine },
+        speechFactory = {
+            speechFactoryCalls.incrementAndGet()
+            speechEngine
+        },
         completionSignals = completionSignals.signals,
         clock = Clock.fixed(
             Instant.parse("2026-08-30T17:00:00Z"),
@@ -320,7 +435,7 @@ private class FakeCaptureAppContainer : AppContainer {
         ),
         zone = ZoneId.of("America/New_York"),
         ioDispatcher = Dispatchers.IO,
-        stopScope = stopScope,
+        recoveryHandoff = recoveryHandoff,
     )
 }
 

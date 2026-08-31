@@ -6,6 +6,7 @@ import androidx.datastore.preferences.preferencesDataStore
 import com.sidenote.app.capture.AndroidCompletionSignalSource
 import com.sidenote.app.capture.AndroidSpeechEngine
 import com.sidenote.app.capture.CaptureDependencies
+import com.sidenote.app.capture.CaptureRecoveryHandoff
 import com.sidenote.app.data.documents.AppendResult
 import com.sidenote.app.data.documents.DocumentRepository
 import com.sidenote.app.data.documents.MarkdownDocumentRepository
@@ -49,11 +50,14 @@ class ProductionAppContainer(
         context = appContext,
         settings = settingsRepository,
     )
-    private val captureStopScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val captureProcessScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val captureRecoveryHandoff = CaptureRecoveryHandoff(
+        store = recoveryStore,
+        processScope = captureProcessScope,
+    )
 
     override fun captureDependencies(): CaptureDependencies = CaptureDependencies(
         settings = settingsRepository,
-        recovery = recoveryStore,
         repository = documentRepository,
         speechFactory = { onlineFallbackAllowed ->
             AndroidSpeechEngine(appContext, onlineFallbackAllowed)
@@ -62,7 +66,7 @@ class ProductionAppContainer(
         clock = Clock.systemUTC(),
         zone = ZoneId.systemDefault(),
         ioDispatcher = Dispatchers.IO,
-        stopScope = captureStopScope,
+        recoveryHandoff = captureRecoveryHandoff,
     )
 }
 

@@ -11,7 +11,6 @@ import com.sidenote.app.data.documents.UpdateResult
 import com.sidenote.app.data.markdown.EntrySource
 import com.sidenote.app.data.markdown.ParsedDailyFile
 import com.sidenote.app.data.recovery.RecoveryDraft
-import com.sidenote.app.data.recovery.RecoveryDraftStore
 import com.sidenote.app.data.recovery.RecoveryDraftWriter
 import com.sidenote.app.data.recovery.RecoveryLoadResult
 import com.sidenote.app.data.settings.SettingsRepository
@@ -24,8 +23,8 @@ import kotlin.time.Duration.Companion.milliseconds
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineDispatcher
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -39,14 +38,13 @@ import kotlinx.coroutines.withContext
 
 data class CaptureDependencies(
     val settings: SettingsRepository,
-    val recovery: RecoveryDraftStore,
     val repository: DocumentRepository,
     val speechFactory: (onlineFallbackAllowed: Boolean) -> SpeechEngine,
     val completionSignals: Flow<CompletionSignal>,
     val clock: Clock,
     val zone: ZoneId,
     val ioDispatcher: CoroutineDispatcher,
-    val stopScope: CoroutineScope,
+    val recoveryHandoff: CaptureRecoveryHandoff,
 )
 
 class CaptureViewModel(
@@ -60,10 +58,7 @@ class CaptureViewModel(
     private val coordinatorReady = CompletableDeferred<CaptureCoordinator>()
     private val eventMutex = Mutex()
     private val host = MutableCaptureHost()
-    private val dispatchedRecovery = DispatcherRecoveryDraftStore(
-        delegate = dependencies.recovery,
-        dispatcher = dependencies.ioDispatcher,
-    )
+    private val recoverySession = dependencies.recoveryHandoff.openSession()
     private val dispatchedRepository = DispatcherDocumentRepository(
         delegate = dependencies.repository,
         dispatcher = dependencies.ioDispatcher,
@@ -72,6 +67,8 @@ class CaptureViewModel(
     @Volatile private var captureActive = false
     @Volatile private var setupInFlight = false
     @Volatile private var backgroundCompletionArmed = false
+    private var captureLifecycleGeneration = 0L
+    private var speechStartupJob: Job? = null
     private var terminalCompletion = false
     private var coordinator: CaptureCoordinator? = null
     private var recoveryWriter: RecoveryDraftWriter? = null
@@ -99,7 +96,7 @@ class CaptureViewModel(
                 val settings = withContext(dependencies.ioDispatcher) {
                     dependencies.settings.settings.first()
                 }
-                val recovered = when (val result = dispatchedRecovery.load()) {
+                val recovered = when (val result = recoverySession.load()) {
                     is RecoveryLoadResult.Draft -> result.draft
                     RecoveryLoadResult.Empty,
                     is RecoveryLoadResult.CorruptDraft,
@@ -108,13 +105,13 @@ class CaptureViewModel(
                 }
                 val currentSpeech = dependencies.speechFactory(settings.onlineFallbackAllowed)
                 val writer = RecoveryDraftWriter(
-                    store = dispatchedRecovery,
+                    store = recoverySession,
                     scope = viewModelScope,
                     debounce = RECOVERY_DEBOUNCE,
                 )
                 val currentCoordinator = CaptureCoordinator(
                     repository = dispatchedRepository,
-                    recovery = dispatchedRecovery,
+                    recovery = recoverySession,
                     saveMutex = Mutex(),
                     clock = dependencies.clock,
                     zone = dependencies.zone,
@@ -152,9 +149,17 @@ class CaptureViewModel(
 
     fun onCaptureStarted() {
         captureActive = true
-        viewModelScope.launch {
+        val lifecycleGeneration = ++captureLifecycleGeneration
+        speechStartupJob?.cancel()
+        speechStartupJob = viewModelScope.launch {
             val currentCoordinator = awaitCoordinator() ?: return@launch
             eventMutex.withLock {
+                if (
+                    !captureActive ||
+                    lifecycleGeneration != captureLifecycleGeneration
+                ) {
+                    return@withLock
+                }
                 startSpeechIfEligible(currentCoordinator)
             }
         }
@@ -162,13 +167,17 @@ class CaptureViewModel(
 
     fun onCaptureStopped(completeIfBackgrounded: Boolean) {
         captureActive = false
+        captureLifecycleGeneration += 1
+        speechStartupJob?.cancel()
+        speechStartupJob = null
         speech?.stop()
-        dependencies.stopScope.launch {
+        val shouldCompleteFromThisStop = completeIfBackgrounded && backgroundCompletionArmed
+        viewModelScope.launch(start = CoroutineStart.UNDISPATCHED) {
             val currentCoordinator = awaitCoordinator() ?: return@launch
             eventMutex.withLock {
                 if (terminalCompletion) return@withLock
                 flushRecovery(currentCoordinator)
-                if (completeIfBackgrounded && backgroundCompletionArmed) {
+                if (shouldCompleteFromThisStop) {
                     completeLocked(currentCoordinator, CompletionSignal.Backgrounded)
                 }
             }
@@ -233,6 +242,9 @@ class CaptureViewModel(
 
     override fun onCleared() {
         captureActive = false
+        captureLifecycleGeneration += 1
+        speechStartupJob?.cancel()
+        speechStartupJob = null
         speech?.stop()
         speech?.destroy()
         coordinatorReady.cancel()
@@ -357,22 +369,6 @@ private class MutableCaptureHost : HapticConfirmation, CaptureCloser {
         val haptic: HapticConfirmation,
         val closer: CaptureCloser,
     )
-}
-
-private class DispatcherRecoveryDraftStore(
-    private val delegate: RecoveryDraftStore,
-    private val dispatcher: CoroutineDispatcher,
-) : RecoveryDraftStore {
-    override suspend fun load(): RecoveryLoadResult =
-        withContext(dispatcher) { delegate.load() }
-
-    override suspend fun save(draft: RecoveryDraft) {
-        withContext(dispatcher) { delegate.save(draft) }
-    }
-
-    override suspend fun clear() {
-        withContext(dispatcher) { delegate.clear() }
-    }
 }
 
 private class DispatcherDocumentRepository(
