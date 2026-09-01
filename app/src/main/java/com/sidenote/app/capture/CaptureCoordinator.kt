@@ -115,6 +115,29 @@ class CaptureCoordinator(
         }
     }
 
+    fun onSpeechRms(normalizedRms: Float) {
+        synchronized(transitionLock) {
+            val current = mutableState.value
+            if (!acceptsSpeech(current)) return
+            val clamped = normalizedRms
+                .takeIf(Float::isFinite)
+                ?.coerceIn(0f, 1f)
+                ?: 0f
+            if (clamped != current.rms) {
+                publishState(current.copy(rms = clamped))
+            }
+        }
+    }
+
+    fun onSpeechStopped() {
+        synchronized(transitionLock) {
+            val current = mutableState.value
+            if (current.rms != 0f) {
+                publishState(current.copy(rms = 0f))
+            }
+        }
+    }
+
     fun onSpeechFailure() {
         synchronized(transitionLock) {
             val current = mutableState.value
@@ -235,6 +258,7 @@ class CaptureCoordinator(
             current.copy(
                 draft = TextFieldValue(updatedText, TextRange(cursor)),
                 speechOwnedRange = if (final) null else TextRange(start, cursor),
+                rms = if (final) 0f else current.rms,
                 status = CaptureStatus.Ready,
             ),
         )

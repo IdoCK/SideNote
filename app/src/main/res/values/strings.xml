@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="capture_placeholder">Enter thought here…</string>
+    <string name="voice_input_on">Voice input on</string>
+    <string name="voice_input_off">Voice input off</string>
+    <string name="discard">Discard</string>
+</resources>

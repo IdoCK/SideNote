@@ -19,6 +19,7 @@ import java.time.Instant
 import java.time.ZoneId
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.time.Duration.Companion.milliseconds
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
@@ -55,6 +56,7 @@ class CaptureViewModel(
     val completionSignals: Flow<CompletionSignal> = dependencies.completionSignals
 
     private val started = AtomicBoolean(false)
+    private val speechSessionGeneration = AtomicLong(0L)
     private val coordinatorReady = CompletableDeferred<CaptureCoordinator>()
     private val eventMutex = Mutex()
     private val host = MutableCaptureHost()
@@ -174,6 +176,8 @@ class CaptureViewModel(
         captureLifecycleGeneration += 1
         speechStartupJob?.cancel()
         speechStartupJob = null
+        speechSessionGeneration.incrementAndGet()
+        coordinator?.onSpeechStopped()
         speech?.stop()
         val shouldCompleteFromThisStop = completeIfBackgrounded && backgroundCompletionArmed
         viewModelScope.launch(start = CoroutineStart.UNDISPATCHED) {
@@ -258,6 +262,8 @@ class CaptureViewModel(
         captureLifecycleGeneration += 1
         speechStartupJob?.cancel()
         speechStartupJob = null
+        speechSessionGeneration.incrementAndGet()
+        coordinator?.onSpeechStopped()
         speech?.stop()
         speech?.destroy()
         coordinatorReady.cancel()
@@ -311,29 +317,57 @@ class CaptureViewModel(
         ) {
             return
         }
-        speech?.start(speechListener)
+        val generation = speechSessionGeneration.incrementAndGet()
+        detectedLanguageTag = null
+        speech?.start(speechListener(generation))
     }
 
-    private val speechListener = object : SpeechEngine.Listener {
+    private fun speechListener(generation: Long) = object : SpeechEngine.Listener {
         override fun onPartial(text: String) {
-            mutateDraft { currentCoordinator -> currentCoordinator.onSpeechPartial(text) }
+            mutateSpeech(generation) { currentCoordinator ->
+                currentCoordinator.onSpeechPartial(text)
+            }
         }
 
         override fun onFinal(text: String) {
             val locale = detectedLanguageTag
                 ?.let(Locale::forLanguageTag)
                 ?: Locale.getDefault()
-            mutateDraft { currentCoordinator -> currentCoordinator.onSpeechFinal(text, locale) }
+            mutateSpeech(generation) { currentCoordinator ->
+                currentCoordinator.onSpeechFinal(text, locale)
+                speechSessionGeneration.compareAndSet(generation, generation + 1)
+            }
         }
 
-        override fun onRms(normalizedRms: Float) = Unit
+        override fun onRms(normalizedRms: Float) {
+            mutateSpeech(generation) { currentCoordinator ->
+                currentCoordinator.onSpeechRms(normalizedRms)
+            }
+        }
 
         override fun onDetectedLanguage(languageTag: String) {
-            detectedLanguageTag = languageTag
+            if (generation == speechSessionGeneration.get()) {
+                detectedLanguageTag = languageTag
+            }
         }
 
         override fun onUnavailable(failure: SpeechFailure) {
-            mutateDraft(CaptureCoordinator::onSpeechFailure)
+            mutateSpeech(generation) { currentCoordinator ->
+                currentCoordinator.onSpeechFailure()
+                speechSessionGeneration.compareAndSet(generation, generation + 1)
+            }
+        }
+    }
+
+    private fun mutateSpeech(
+        generation: Long,
+        mutation: (CaptureCoordinator) -> Unit,
+    ) {
+        if (generation != speechSessionGeneration.get()) return
+        mutateDraft { currentCoordinator ->
+            if (generation == speechSessionGeneration.get()) {
+                mutation(currentCoordinator)
+            }
         }
     }
 

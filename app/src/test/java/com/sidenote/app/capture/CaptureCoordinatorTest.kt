@@ -120,12 +120,46 @@ class CaptureCoordinatorTest {
     fun finalSpeechCommitsOwnedSpan() {
         coordinator.start(voiceDefaultOn = true, recovered = null)
         coordinator.onSpeechPartial("one")
+        coordinator.onSpeechRms(0.8f)
 
         coordinator.onSpeechFinal("one two", Locale.ENGLISH)
 
         assertThat(coordinator.state.value.draft.text).isEqualTo("one two")
         assertThat(coordinator.state.value.draft.selection).isEqualTo(TextRange(7))
         assertThat(coordinator.state.value.speechOwnedRange).isNull()
+        assertThat(coordinator.state.value.rms).isEqualTo(0f)
+    }
+
+    @Test
+    fun speechRmsIsClampedAndAcceptedOnlyWhileVoiceIsReady() = runTest {
+        coordinator.start(voiceDefaultOn = true, recovered = null)
+
+        coordinator.onSpeechRms(1.7f)
+        assertThat(coordinator.state.value.rms).isEqualTo(1f)
+
+        coordinator.onUserEdit(TextFieldValue("typing", TextRange(6)))
+        coordinator.onSpeechRms(0.9f)
+        assertThat(coordinator.state.value.rms).isEqualTo(0f)
+
+        coordinator.onVoiceToggle()
+        coordinator.onSpeechRms(-0.4f)
+        assertThat(coordinator.state.value.rms).isEqualTo(0f)
+
+        coordinator.onSpeechRms(0.45f)
+        assertThat(coordinator.state.value.rms).isEqualTo(0.45f)
+
+        coordinator.onSpeechStopped()
+        assertThat(coordinator.state.value.rms).isEqualTo(0f)
+
+        val suspendedAppend = repository.suspendNextAppend()
+        coordinator.onUserEdit(TextFieldValue("saving", TextRange(6)))
+        coordinator.onVoiceToggle()
+        val completion = launch { coordinator.complete(CompletionSignal.ScreenOff) }
+        suspendedAppend.started.await()
+        coordinator.onSpeechRms(0.95f)
+        assertThat(coordinator.state.value.rms).isEqualTo(0f)
+        suspendedAppend.release.complete(Unit)
+        completion.join()
     }
 
     @Test
@@ -430,6 +464,7 @@ class CaptureCoordinatorTest {
         coordinator.onVoiceToggle()
         coordinator.onSpeechPartial("late partial")
         coordinator.onSpeechFinal("late final", Locale.ENGLISH)
+        coordinator.onSpeechRms(0.9f)
         coordinator.onSpeechFailure()
     }
 }
