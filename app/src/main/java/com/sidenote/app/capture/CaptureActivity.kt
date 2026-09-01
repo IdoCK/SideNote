@@ -26,18 +26,11 @@ class CaptureActivity : ComponentActivity() {
         val container = (application as SideNoteApplication).container
         CaptureViewModel.Factory(container.captureDependencies())
     }
-    private val externalSetupGate = ExternalSetupLaunchGate(
-        disarm = { viewModel.disarmBackgroundCompletionForSetup() },
-        rearm = { viewModel.armBackgroundCompletionAfterSetup() },
-    )
-    @Volatile private var externalSetupToken: Long? = null
     private val externalSetupLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult(),
     ) {
-        externalSetupToken?.let { token ->
-            if (externalSetupGate.onResult(token)) {
-                externalSetupToken = null
-            }
+        viewModel.activeExternalSetupToken()?.let { token ->
+            viewModel.onExternalSetupResult(token)
         }
     }
 
@@ -80,15 +73,12 @@ class CaptureActivity : ComponentActivity() {
     }
 
     fun launchExternalSetup(intent: Intent): Boolean {
-        val token = externalSetupGate.begin() ?: return false
-        externalSetupToken = token
+        val token = viewModel.beginExternalSetup() ?: return false
         return try {
             externalSetupLauncher.launch(intent)
             true
         } catch (_: Exception) {
-            if (externalSetupGate.onLaunchFailed(token)) {
-                externalSetupToken = null
-            }
+            viewModel.onExternalSetupLaunchFailed(token)
             false
         }
     }

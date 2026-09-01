@@ -17,6 +17,8 @@ internal class ExternalSetupLaunchGate(
         token
     }
 
+    fun activeToken(): Long? = synchronized(lock) { activeToken }
+
     fun onLaunchFailed(token: Long): Boolean = finish(token)
 
     fun onResult(token: Long): Boolean = finish(token)

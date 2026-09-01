@@ -63,6 +63,10 @@ class CaptureViewModel(
         delegate = dependencies.repository,
         dispatcher = dependencies.ioDispatcher,
     )
+    private val externalSetupGate = ExternalSetupLaunchGate(
+        disarm = ::disarmBackgroundCompletionForSetup,
+        rearm = ::armBackgroundCompletionAfterSetup,
+    )
 
     @Volatile private var captureActive = false
     @Volatile private var setupInFlight = false
@@ -184,12 +188,21 @@ class CaptureViewModel(
         }
     }
 
-    fun disarmBackgroundCompletionForSetup() {
+    fun beginExternalSetup(): Long? = externalSetupGate.begin()
+
+    fun activeExternalSetupToken(): Long? = externalSetupGate.activeToken()
+
+    fun onExternalSetupResult(token: Long): Boolean = externalSetupGate.onResult(token)
+
+    fun onExternalSetupLaunchFailed(token: Long): Boolean =
+        externalSetupGate.onLaunchFailed(token)
+
+    private fun disarmBackgroundCompletionForSetup() {
         setupInFlight = true
         backgroundCompletionArmed = false
     }
 
-    fun armBackgroundCompletionAfterSetup() {
+    private fun armBackgroundCompletionAfterSetup() {
         setupInFlight = false
         backgroundCompletionArmed = false
         viewModelScope.launch {

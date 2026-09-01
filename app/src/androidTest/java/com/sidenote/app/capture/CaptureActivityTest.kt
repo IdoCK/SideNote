@@ -65,6 +65,7 @@ class CaptureActivityTest {
     private lateinit var originalContainer: AppContainer
     private lateinit var container: FakeCaptureAppContainer
     private var scenario: ActivityScenario<CaptureActivity>? = null
+    private var recreatedCapture: CaptureActivity? = null
     private var lockScreenWasDisabled = false
 
     @Before
@@ -76,6 +77,11 @@ class CaptureActivityTest {
 
     @After
     fun restoreApplicationAndDevice() {
+        recreatedCapture?.let { activity ->
+            InstrumentationRegistry.getInstrumentation().runOnMainSync {
+                if (!activity.isFinishing) activity.finish()
+            }
+        }
         scenario?.close()
         container.close()
         application.installContainerForTesting(originalContainer)
@@ -266,6 +272,50 @@ class CaptureActivityTest {
     }
 
     @Test
+    fun externalSetupStateSurvivesCaptureRecreationUntilOriginalResult() {
+        launchCapture()
+        compose.waitUntil(timeoutMillis = 5_000) { container.settingsReads.get() == 1 }
+
+        scenario?.onActivity { activity ->
+            assertThat(
+                activity.launchExternalSetup(Intent(activity, MainActivity::class.java)),
+            ).isTrue()
+        }
+        compose.waitUntil(timeoutMillis = 5_000) {
+            captureScenarioState() == Lifecycle.State.CREATED &&
+                container.events.contains("save") &&
+                container.completionSignals.activeCollectors.get() == 0
+        }
+
+        val replacement = recreateStoppedCapture()
+        var replacementAcceptedSecondLaunch = false
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            replacementAcceptedSecondLaunch = replacement.launchExternalSetup(
+                Intent(replacement, MainActivity::class.java),
+            )
+        }
+
+        if (replacementAcceptedSecondLaunch) {
+            finishExternalSetup()
+        }
+        finishExternalSetup()
+        waitForCaptureResumed(replacement)
+        compose.waitUntil(timeoutMillis = 5_000) { container.settingsReads.get() >= 2 }
+
+        assertThat(container.settingsReads.get()).isEqualTo(2)
+        assertThat(container.repository.appends).isEmpty()
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            assertThat(replacement.moveTaskToBack(true)).isTrue()
+        }
+        compose.waitUntil(timeoutMillis = 5_000) {
+            container.repository.appends.size == 1
+        }
+
+        assertThat(replacementAcceptedSecondLaunch).isFalse()
+        assertThat(container.repository.appends).containsExactly("captured thought")
+    }
+
+    @Test
     fun setupBackgroundFlushesRecoveryWithoutCompleting() {
         container.markSetupIncomplete()
         launchCapture()
@@ -343,6 +393,35 @@ class CaptureActivityTest {
         }
     }
 
+    private fun recreateStoppedCapture(): CaptureActivity {
+        val original = liveCaptureActivities().single()
+        InstrumentationRegistry.getInstrumentation().runOnMainSync(original::recreate)
+
+        var replacement: CaptureActivity? = null
+        waitUntil(timeoutMillis = 5_000) {
+            replacement = liveCaptureActivities().singleOrNull { activity -> activity !== original }
+            replacement != null
+        }
+        return checkNotNull(replacement).also { activity -> recreatedCapture = activity }
+    }
+
+    private fun liveCaptureActivities(): List<CaptureActivity> {
+        var activities = emptyList<CaptureActivity>()
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            val monitor = ActivityLifecycleMonitorRegistry.getInstance()
+            activities = listOf(
+                Stage.CREATED,
+                Stage.STARTED,
+                Stage.RESUMED,
+                Stage.PAUSED,
+                Stage.STOPPED,
+            ).flatMap { stage -> monitor.getActivitiesInStage(stage) }
+                .filterIsInstance<CaptureActivity>()
+                .filter { activity -> !activity.isDestroyed }
+        }
+        return activities
+    }
+
     private fun waitForCaptureResumed() {
         val deadline = SystemClock.uptimeMillis() + 5_000
         while (
@@ -354,6 +433,23 @@ class CaptureActivityTest {
         }
         assertThat(captureScenarioState()).isEqualTo(Lifecycle.State.RESUMED)
         assertThat(container.completionSignals.activeCollectors.get()).isEqualTo(1)
+    }
+
+    private fun waitForCaptureResumed(activity: CaptureActivity) {
+        waitUntil(timeoutMillis = 5_000) {
+            activityInStage(activity, Stage.RESUMED) &&
+                container.completionSignals.activeCollectors.get() == 1
+        }
+    }
+
+    private fun activityInStage(activity: CaptureActivity, stage: Stage): Boolean {
+        var matches = false
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            matches = ActivityLifecycleMonitorRegistry.getInstance()
+                .getActivitiesInStage(stage)
+                .any { candidate -> candidate === activity }
+        }
+        return matches
     }
 
     private fun captureScenarioState(): Lifecycle.State? =
@@ -403,6 +499,7 @@ private class FakeCaptureAppContainer : AppContainer {
     private val settings = FakeSettingsRepository()
     val speechEngine = FakeSpeechEngine()
     val speechFactoryCalls = AtomicInteger()
+    val settingsReads: AtomicInteger get() = settings.reads
     private val processScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val recoveryHandoff = CaptureRecoveryHandoff(recovery, processScope)
 
@@ -411,10 +508,7 @@ private class FakeCaptureAppContainer : AppContainer {
     }
 
     fun markSetupIncomplete() {
-        settings.settings.value = settings.settings.value.copy(
-            treeUri = null,
-            onboardingComplete = false,
-        )
+        settings.markSetupIncomplete()
     }
 
     fun close() {
@@ -451,13 +545,24 @@ private class FakeCompletionSignals {
 }
 
 private class FakeSettingsRepository : SettingsRepository {
-    override val settings = MutableStateFlow(
+    private val mutableSettings = MutableStateFlow(
         AppSettings(
             treeUri = Uri.parse("content://com.sidenote.app.test.documents/root"),
             voiceOnAtLaunch = false,
             onboardingComplete = true,
         ),
     )
+    val reads = AtomicInteger()
+    override val settings: Flow<AppSettings> = mutableSettings.onStart {
+        reads.incrementAndGet()
+    }
+
+    fun markSetupIncomplete() {
+        mutableSettings.value = mutableSettings.value.copy(
+            treeUri = null,
+            onboardingComplete = false,
+        )
+    }
 
     override suspend fun setTreeUri(treeUri: Uri?) = Unit
 
