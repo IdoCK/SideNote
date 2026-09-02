@@ -15,8 +15,8 @@ import org.junit.runner.RunWith
 class AppLaunchTest {
     @get:Rule val rule = createAndroidComposeRule<MainActivity>()
 
-    @Test fun launchesIntoCaptureHeading() {
-        rule.onNodeWithText("Capture")
+    @Test fun launchesIntoFirstRunSetupHeading() {
+        rule.onNodeWithText("SideNote")
             .assert(SemanticsMatcher.keyIsDefined(SemanticsProperties.Heading))
             .assertIsDisplayed()
     }

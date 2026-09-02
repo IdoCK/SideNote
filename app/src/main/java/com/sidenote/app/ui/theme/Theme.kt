@@ -7,6 +7,10 @@ import androidx.compose.runtime.Composable
 private val SideNoteColorScheme = lightColorScheme(
     primary = SideNotePrimary,
     onPrimary = SideNoteOnPrimary,
+    background = SideNoteBackground,
+    onBackground = SideNoteOnBackground,
+    surface = SideNoteSurface,
+    onSurface = SideNoteOnSurface,
 )
 
 @Composable

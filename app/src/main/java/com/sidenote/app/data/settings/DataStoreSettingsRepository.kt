@@ -24,6 +24,7 @@ class DataStoreSettingsRepository(
                 treeUri = preferences[TREE_URI]?.let(Uri::parse),
                 voiceOnAtLaunch = preferences[VOICE_ON_AT_LAUNCH] ?: true,
                 onlineFallbackAllowed = preferences[ONLINE_FALLBACK_ALLOWED] ?: false,
+                voiceDisclosureAccepted = preferences[VOICE_DISCLOSURE_ACCEPTED] ?: false,
                 onboardingComplete = preferences[ONBOARDING_COMPLETE] ?: false,
             )
         }
@@ -46,6 +47,7 @@ class DataStoreSettingsRepository(
 
     override suspend fun acceptVoiceDisclosureAndSetFallback(allowed: Boolean) {
         dataStore.edit { preferences ->
+            preferences[VOICE_DISCLOSURE_ACCEPTED] = true
             preferences[ONLINE_FALLBACK_ALLOWED] = allowed
         }
     }
@@ -60,6 +62,7 @@ class DataStoreSettingsRepository(
         val TREE_URI = stringPreferencesKey("tree_uri")
         val VOICE_ON_AT_LAUNCH = booleanPreferencesKey("voice_on_at_launch")
         val ONLINE_FALLBACK_ALLOWED = booleanPreferencesKey("online_fallback_allowed")
+        val VOICE_DISCLOSURE_ACCEPTED = booleanPreferencesKey("voice_disclosure_accepted")
         val ONBOARDING_COMPLETE = booleanPreferencesKey("onboarding_complete")
     }
 }

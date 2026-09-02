@@ -43,6 +43,7 @@ class SettingsRepositoryTest {
         repo.acceptVoiceDisclosureAndSetFallback(true)
 
         assertThat(repo.settings.first().onlineFallbackAllowed).isTrue()
+        assertThat(repo.settings.first().voiceDisclosureAccepted).isTrue()
     }
 
     @Test

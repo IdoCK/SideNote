@@ -7,6 +7,7 @@ import com.sidenote.app.capture.AndroidCompletionSignalSource
 import com.sidenote.app.capture.AndroidSpeechEngine
 import com.sidenote.app.capture.CaptureDependencies
 import com.sidenote.app.capture.CaptureRecoveryHandoff
+import com.sidenote.app.capture.SpeechEngine
 import com.sidenote.app.data.documents.AppendResult
 import com.sidenote.app.data.documents.DocumentRepository
 import com.sidenote.app.data.documents.MarkdownDocumentRepository
@@ -35,7 +36,16 @@ private val Context.settingsDataStore by preferencesDataStore(name = "settings")
 
 interface AppContainer {
     fun captureDependencies(): CaptureDependencies
+
+    fun mainDependencies(): MainDependencies? = null
 }
+
+data class MainDependencies(
+    val settings: SettingsRepository,
+    val repository: DocumentRepository,
+    val speechFactory: (onlineFallbackAllowed: Boolean) -> SpeechEngine,
+    val ioDispatcher: kotlinx.coroutines.CoroutineDispatcher,
+)
 
 class ProductionAppContainer(
     context: Context,
@@ -67,6 +77,15 @@ class ProductionAppContainer(
         zone = ZoneId.systemDefault(),
         ioDispatcher = Dispatchers.IO,
         recoveryHandoff = captureRecoveryHandoff,
+    )
+
+    override fun mainDependencies(): MainDependencies = MainDependencies(
+        settings = settingsRepository,
+        repository = documentRepository,
+        speechFactory = { onlineFallbackAllowed ->
+            AndroidSpeechEngine(appContext, onlineFallbackAllowed)
+        },
+        ioDispatcher = Dispatchers.IO,
     )
 }
 
