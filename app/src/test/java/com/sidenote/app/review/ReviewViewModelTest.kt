@@ -3,6 +3,7 @@ package com.sidenote.app.review
 import com.google.common.truth.Truth.assertThat
 import com.sidenote.app.data.documents.AppendResult
 import com.sidenote.app.data.documents.DocumentRepository
+import com.sidenote.app.data.documents.DocumentStoreException
 import com.sidenote.app.data.documents.RepositoryError
 import com.sidenote.app.data.documents.UpdateResult
 import com.sidenote.app.data.markdown.EntrySource
@@ -175,6 +176,138 @@ class ReviewViewModelTest {
     }
 
     @Test
+    fun queuedUpdatesForTwoRowsInOneFileResolveTheSecondAgainstTheFreshFile() =
+        runTest(mainDispatcher) {
+            val sourceDay = day(
+                "2026-08-27",
+                "- [ ] **08:00** first @Work\n- [ ] **09:00** second @Work",
+            )
+            val repository = FakeDocumentRepository(listOf(sourceDay))
+            val viewModel = ReviewViewModel(repository, mainDispatcher)
+            advanceUntilIdle()
+            val entries = viewModel.state.value.days.single().entries
+
+            viewModel.setProcessed(entries[0], true)
+            viewModel.setProcessed(entries[1], true)
+            advanceUntilIdle()
+
+            assertThat(repository.updates).hasSize(2)
+            assertThat(repository.updates[1].source).isEqualTo(sourceDay.entries[1].source)
+            assertThat(repository.updates[1].expectedRaw).isEqualTo(
+                "# 2026-08-27\n\n" +
+                    "- [x] **08:00** first @Work\n" +
+                    "- [ ] **09:00** second @Work\n",
+            )
+            assertThat(viewModel.state.value.days.single().entries.map { it.entry.processed })
+                .containsExactly(true, true)
+                .inOrder()
+            assertThat(viewModel.state.value.message).isNull()
+        }
+
+    @Test
+    fun repeatedQueuedChangesForOneRowCoalesceToTheLatestDesiredState() =
+        runTest(mainDispatcher) {
+            val repository = FakeDocumentRepository(
+                listOf(day("2026-08-27", "- [ ] **08:00** pending")),
+            )
+            val viewModel = ReviewViewModel(repository, mainDispatcher)
+            advanceUntilIdle()
+            val entry = viewModel.state.value.days.single().entries.single()
+
+            viewModel.setProcessed(entry, true)
+            viewModel.setProcessed(entry, false)
+            viewModel.setProcessed(entry, true)
+            advanceUntilIdle()
+
+            assertThat(repository.updates).hasSize(1)
+            assertThat(repository.updates.single().processed).isTrue()
+            assertThat(viewModel.state.value.days.single().entries.single().entry.processed).isTrue()
+        }
+
+    @Test
+    fun failedRefreshAfterAQueuedWriteStopsBeforeUsingAnyStaleProjection() =
+        runTest(mainDispatcher) {
+            val repository = FakeDocumentRepository(
+                listOf(
+                    day(
+                        "2026-08-27",
+                        "- [ ] **08:00** first\n- [ ] **09:00** second",
+                    ),
+                ),
+            ).apply {
+                failDaysOnCall = 2
+            }
+            val viewModel = ReviewViewModel(repository, mainDispatcher)
+            advanceUntilIdle()
+            val entries = viewModel.state.value.days.single().entries
+
+            viewModel.setProcessed(entries[0], true)
+            viewModel.setProcessed(entries[1], true)
+            advanceUntilIdle()
+
+            assertThat(repository.updates).hasSize(1)
+            assertThat(repository.daysCalls).isEqualTo(2)
+            assertThat(repository.days.single().entries.map { it.processed })
+                .containsExactly(true, false)
+                .inOrder()
+            assertThat(viewModel.state.value.message).isEqualTo(ReviewMessage.FolderAccessLost)
+        }
+
+    @Test
+    fun initialConfiguredSourceUsesOnlyTheViewModelInitRead() =
+        runTest(mainDispatcher) {
+            val repository = FakeDocumentRepository(
+                listOf(day("2026-08-27", "- [ ] **08:00** pending")),
+            )
+            val viewModel = ReviewViewModel(repository, mainDispatcher)
+            advanceUntilIdle()
+
+            viewModel.onDocumentSourceObserved("content://notes/tree/first", onboardingComplete = true)
+            advanceUntilIdle()
+            assertThat(repository.daysCalls).isEqualTo(1)
+
+            viewModel.onDocumentSourceObserved("content://notes/tree/first", onboardingComplete = true)
+            advanceUntilIdle()
+            assertThat(repository.daysCalls).isEqualTo(1)
+        }
+
+    @Test
+    fun postInitialOnboardingAndFolderTransitionsEachRefreshOnce() =
+        runTest(mainDispatcher) {
+            val repository = FakeDocumentRepository(
+                listOf(day("2026-08-27", "- [ ] **08:00** pending")),
+            )
+            val viewModel = ReviewViewModel(repository, mainDispatcher)
+            advanceUntilIdle()
+
+            viewModel.onDocumentSourceObserved(treeUri = null, onboardingComplete = false)
+            viewModel.onDocumentSourceObserved(
+                treeUri = "content://notes/tree/first",
+                onboardingComplete = false,
+            )
+            advanceUntilIdle()
+            assertThat(repository.daysCalls).isEqualTo(1)
+
+            viewModel.onDocumentSourceObserved(
+                treeUri = "content://notes/tree/first",
+                onboardingComplete = true,
+            )
+            advanceUntilIdle()
+            assertThat(repository.daysCalls).isEqualTo(2)
+
+            viewModel.onDocumentSourceObserved(
+                treeUri = "content://notes/tree/first",
+                onboardingComplete = true,
+            )
+            advanceUntilIdle()
+            assertThat(repository.daysCalls).isEqualTo(2)
+
+            viewModel.onDocumentSourceObserved("content://notes/tree/second", onboardingComplete = true)
+            advanceUntilIdle()
+            assertThat(repository.daysCalls).isEqualTo(3)
+        }
+
+    @Test
     fun checkboxConflictReloadsInsteadOfOverwriting() = runTest(mainDispatcher) {
         val sourceDay = day("2026-08-27", "- [ ] **08:00** pending")
         val repository = FakeDocumentRepository(listOf(sourceDay)).apply {
@@ -196,6 +329,32 @@ class ReviewViewModelTest {
                 processed = true,
             ),
         )
+        assertThat(viewModel.state.value.message).isEqualTo(ReviewMessage.FileChanged)
+    }
+
+    @Test
+    fun externalFileChangeStillConflictsAndReloadsWithoutOverwriting() = runTest(mainDispatcher) {
+        val sourceDay = day("2026-08-27", "- [ ] **08:00** pending")
+        val repository = FakeDocumentRepository(listOf(sourceDay))
+        val viewModel = ReviewViewModel(repository, mainDispatcher)
+        advanceUntilIdle()
+        val staleEntry = viewModel.state.value.days.single().entries.single()
+        repository.days = listOf(
+            day(
+                "2026-08-27",
+                "- [ ] **08:00** pending\n- [ ] **09:00** externally added",
+            ),
+        )
+
+        viewModel.setProcessed(staleEntry, true)
+        advanceUntilIdle()
+
+        assertThat(repository.updates).hasSize(1)
+        assertThat(repository.daysCalls).isEqualTo(2)
+        assertThat(viewModel.state.value.days.single().entries.map { it.entry.text })
+            .containsExactly("pending", "externally added")
+            .inOrder()
+        assertThat(viewModel.state.value.days.single().entries.first().entry.processed).isFalse()
         assertThat(viewModel.state.value.message).isEqualTo(ReviewMessage.FileChanged)
     }
 
@@ -293,6 +452,7 @@ private class FakeDocumentRepository(
 ) : DocumentRepository {
     var days: List<ParsedDailyFile> = days
     var daysCalls: Int = 0
+    var failDaysOnCall: Int? = null
     var nextUpdate: UpdateResult = UpdateResult.Success
     val updates = mutableListOf<UpdateCall>()
     private val codec = MarkdownCodec()
@@ -305,6 +465,9 @@ private class FakeDocumentRepository(
 
     override suspend fun days(): List<ParsedDailyFile> {
         daysCalls += 1
+        if (daysCalls == failDaysOnCall) {
+            throw DocumentStoreException(RepositoryError.PermissionLost)
+        }
         return days
     }
 
@@ -316,6 +479,14 @@ private class FakeDocumentRepository(
     ): UpdateResult {
         updates += UpdateCall(source, fileName, expectedRaw, processed)
         val result = nextUpdate.also { nextUpdate = UpdateResult.Success }
+        if (result == UpdateResult.Success) {
+            val exactFile = days.singleOrNull { day ->
+                "${day.date}.md" == fileName && day.raw == expectedRaw
+            } ?: return UpdateResult.Conflict
+            if (codec.rewriteProcessed(exactFile.raw, source, processed) is RewriteResult.Conflict) {
+                return UpdateResult.Conflict
+            }
+        }
         if (result == UpdateResult.Success) {
             days = days.map { day ->
                 if ("${day.date}.md" != fileName || day.raw != expectedRaw) return@map day

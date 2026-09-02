@@ -83,7 +83,12 @@ class MainActivity : ComponentActivity() {
                 val reviewState by reviewViewModel.state.collectAsState()
                 val settings = mainState.settings
                 LaunchedEffect(settings?.treeUri, settings?.onboardingComplete) {
-                    if (settings?.onboardingComplete == true) reviewViewModel.refresh()
+                    settings?.let { current ->
+                        reviewViewModel.onDocumentSourceObserved(
+                            treeUri = current.treeUri?.toString(),
+                            onboardingComplete = current.onboardingComplete,
+                        )
+                    }
                 }
                 SideNoteNavHost(
                     mainState = mainState,

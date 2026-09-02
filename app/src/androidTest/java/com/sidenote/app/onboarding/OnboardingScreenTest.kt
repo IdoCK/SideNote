@@ -137,6 +137,40 @@ class OnboardingScreenTest {
     }
 
     @Test
+    fun eitherSpeechPreparationOperationDisablesBothPreparationActions() {
+        var preparation by mutableStateOf(SpeechPreparationState.Checking)
+        setContent {
+            OnboardingScreen(
+                step = OnboardingStep.Voice,
+                settings = AppSettings(
+                    treeUri = Uri.parse("content://notes/tree/SideNote"),
+                    voiceDisclosureAccepted = true,
+                ),
+                folderLabel = "SideNote",
+                microphoneGranted = true,
+                notificationsGranted = true,
+                speechPreparation = preparation,
+                message = null,
+                onChooseFolder = {},
+                onRequestPermissions = {},
+                onAcceptVoiceDisclosure = {},
+                onOnlineFallbackChange = {},
+                onCheckSpeech = {},
+                onDownloadModels = {},
+                onContinue = {},
+            )
+        }
+
+        compose.onNodeWithText("Check English + Hebrew").assertIsNotEnabled()
+        compose.onNodeWithText("Download speech models").assertIsNotEnabled()
+
+        compose.runOnIdle { preparation = SpeechPreparationState.Downloading }
+
+        compose.onNodeWithText("Check English + Hebrew").assertIsNotEnabled()
+        compose.onNodeWithText("Download speech models").assertIsNotEnabled()
+    }
+
+    @Test
     fun finalStepShowsTheExactPixelQuickTapPath() {
         setContent {
             OnboardingScreen(

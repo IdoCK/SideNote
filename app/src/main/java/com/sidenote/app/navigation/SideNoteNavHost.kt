@@ -16,6 +16,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.sidenote.app.MainDependencies
 import com.sidenote.app.capture.SpeechAvailability
+import com.sidenote.app.capture.SpeechEngine
 import com.sidenote.app.data.settings.AppSettings
 import com.sidenote.app.onboarding.OnboardingScreen
 import com.sidenote.app.onboarding.OnboardingStep
@@ -25,6 +26,8 @@ import com.sidenote.app.review.ReviewState
 import com.sidenote.app.review.ui.ReviewScreen
 import com.sidenote.app.review.ui.SettingsScreen
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -50,10 +53,20 @@ class SideNoteMainViewModel(
     private val mutableState = MutableStateFlow(SideNoteMainState())
     val state: StateFlow<SideNoteMainState> = mutableState.asStateFlow()
     private var onboardingStepInitialized = false
+    private var observedSpeechPolicy: SpeechPolicy? = null
+    private var speechOperationGeneration = 0L
+    private var speechOperationJob: Job? = null
+    private var activeSpeechResource: SpeechPreparationResource? = null
 
     init {
         viewModelScope.launch {
             dependencies.settings.settings.collect { settings ->
+                val speechPolicy = settings.speechPolicy()
+                val previousSpeechPolicy = observedSpeechPolicy
+                observedSpeechPolicy = speechPolicy
+                if (previousSpeechPolicy != null && previousSpeechPolicy != speechPolicy) {
+                    invalidateSpeechPreparation()
+                }
                 val current = mutableState.value
                 val step = if (!onboardingStepInitialized) {
                     onboardingStepInitialized = true
@@ -136,64 +149,94 @@ class SideNoteMainViewModel(
     }
 
     fun checkSpeechSupport() {
-        if (mutableState.value.speechPreparation == SpeechPreparationState.Checking) return
-        mutableState.value = mutableState.value.copy(
-            speechPreparation = SpeechPreparationState.Checking,
-            message = null,
-        )
-        viewModelScope.launch {
-            val engine = dependencies.speechFactory(
-                mutableState.value.settings?.onlineFallbackAllowed == true,
-            )
-            try {
-                val availability = withContext(dependencies.ioDispatcher) { engine.support() }
-                mutableState.value = mutableState.value.copy(
-                    speechPreparation = if (availability == SpeechAvailability.Available) {
-                        SpeechPreparationState.Available
-                    } else {
-                        SpeechPreparationState.TypedOnly
-                    },
-                )
-            } catch (error: CancellationException) {
-                throw error
-            } catch (_: Exception) {
-                mutableState.value = mutableState.value.copy(
-                    speechPreparation = SpeechPreparationState.TypedOnly,
-                    message = "Speech support could not be checked. Typing still works.",
-                )
-            } finally {
-                engine.destroy()
+        startSpeechPreparation(
+            inProgress = SpeechPreparationState.Checking,
+            failureMessage = "Speech support could not be checked. Typing still works.",
+        ) { engine ->
+            if (engine.support() == SpeechAvailability.Available) {
+                SpeechPreparationState.Available
+            } else {
+                SpeechPreparationState.TypedOnly
             }
         }
     }
 
     fun requestModelDownloads() {
-        if (mutableState.value.speechPreparation == SpeechPreparationState.Downloading) return
+        startSpeechPreparation(
+            inProgress = SpeechPreparationState.Downloading,
+            failureMessage = "Speech models could not be requested. Typing still works.",
+        ) { engine ->
+            engine.requestModelDownloads()
+            SpeechPreparationState.DownloadRequested
+        }
+    }
+
+    private fun startSpeechPreparation(
+        inProgress: SpeechPreparationState,
+        failureMessage: String,
+        operation: suspend (SpeechEngine) -> SpeechPreparationState,
+    ) {
+        if (speechOperationJob != null || mutableState.value.speechPreparation.isInProgress()) return
+        val policySnapshot = mutableState.value.settings?.speechPolicy() ?: SpeechPolicy()
+        val generation = ++speechOperationGeneration
         mutableState.value = mutableState.value.copy(
-            speechPreparation = SpeechPreparationState.Downloading,
+            speechPreparation = inProgress,
             message = null,
         )
-        viewModelScope.launch {
-            val engine = dependencies.speechFactory(
-                mutableState.value.settings?.onlineFallbackAllowed == true,
-            )
+        val job = viewModelScope.launch(start = CoroutineStart.LAZY) {
+            var resource: SpeechPreparationResource? = null
             try {
-                withContext(dependencies.ioDispatcher) { engine.requestModelDownloads() }
-                mutableState.value = mutableState.value.copy(
-                    speechPreparation = SpeechPreparationState.DownloadRequested,
+                resource = SpeechPreparationResource(
+                    dependencies.speechFactory(policySnapshot.onlineFallbackAllowed),
                 )
+                activeSpeechResource = resource
+                val result = withContext(dependencies.ioDispatcher) {
+                    operation(resource.engine)
+                }
+                if (isCurrentSpeechOperation(generation, policySnapshot)) {
+                    mutableState.value = mutableState.value.copy(speechPreparation = result)
+                }
             } catch (error: CancellationException) {
                 throw error
             } catch (_: Exception) {
-                mutableState.value = mutableState.value.copy(
-                    speechPreparation = SpeechPreparationState.TypedOnly,
-                    message = "Speech models could not be requested. Typing still works.",
-                )
+                if (isCurrentSpeechOperation(generation, policySnapshot)) {
+                    mutableState.value = mutableState.value.copy(
+                        speechPreparation = SpeechPreparationState.TypedOnly,
+                        message = failureMessage,
+                    )
+                }
             } finally {
-                engine.destroy()
+                resource?.destroy()
+                if (activeSpeechResource === resource) activeSpeechResource = null
+                if (
+                    generation != speechOperationGeneration &&
+                    mutableState.value.speechPreparation.isInProgress()
+                ) {
+                    mutableState.value = mutableState.value.copy(
+                        speechPreparation = SpeechPreparationState.Idle,
+                    )
+                }
+                speechOperationJob = null
             }
         }
+        speechOperationJob = job
+        job.start()
     }
+
+    private fun invalidateSpeechPreparation() {
+        speechOperationGeneration += 1
+        activeSpeechResource?.destroy()
+        speechOperationJob?.cancel()
+        if (speechOperationJob == null) {
+            mutableState.value = mutableState.value.copy(
+                speechPreparation = SpeechPreparationState.Idle,
+            )
+        }
+    }
+
+    private fun isCurrentSpeechOperation(generation: Long, policySnapshot: SpeechPolicy): Boolean =
+        generation == speechOperationGeneration &&
+            mutableState.value.settings?.speechPolicy() == policySnapshot
 
     private suspend fun runSettingWrite(
         write: suspend () -> Unit,
@@ -221,6 +264,32 @@ class SideNoteMainViewModel(
         }
     }
 }
+
+private data class SpeechPolicy(
+    val disclosureAccepted: Boolean = false,
+    val onlineFallbackAllowed: Boolean = false,
+)
+
+private fun AppSettings.speechPolicy(): SpeechPolicy = SpeechPolicy(
+    disclosureAccepted = voiceDisclosureAccepted,
+    onlineFallbackAllowed = onlineFallbackAllowed,
+)
+
+private class SpeechPreparationResource(
+    val engine: SpeechEngine,
+) {
+    private var destroyed = false
+
+    @Synchronized
+    fun destroy() {
+        if (destroyed) return
+        destroyed = true
+        engine.destroy()
+    }
+}
+
+private fun SpeechPreparationState.isInProgress(): Boolean =
+    this == SpeechPreparationState.Checking || this == SpeechPreparationState.Downloading
 
 @Composable
 fun SideNoteNavHost(

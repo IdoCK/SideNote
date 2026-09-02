@@ -163,20 +163,23 @@ private fun VoiceStep(
         onCheckedChange = onOnlineFallbackChange,
     )
     Text("SideNote checks English (US) and Hebrew speech support on this device.")
+    val speechPreparationInProgress =
+        speechPreparation == SpeechPreparationState.Checking ||
+            speechPreparation == SpeechPreparationState.Downloading
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         Button(
             onClick = onCheckSpeech,
-            enabled = speechPreparation != SpeechPreparationState.Checking,
+            enabled = !speechPreparationInProgress,
             modifier = Modifier.weight(1f).sizeIn(minHeight = 48.dp),
         ) {
             Text("Check English + Hebrew")
         }
         Button(
             onClick = onDownloadModels,
-            enabled = speechPreparation != SpeechPreparationState.Downloading,
+            enabled = !speechPreparationInProgress,
             modifier = Modifier.weight(1f).sizeIn(minHeight = 48.dp),
         ) {
             Text("Download speech models")
