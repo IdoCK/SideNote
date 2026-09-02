@@ -340,9 +340,7 @@ class CaptureViewModel(
         }
 
         override fun onRms(normalizedRms: Float) {
-            mutateSpeech(generation) { currentCoordinator ->
-                currentCoordinator.onSpeechRms(normalizedRms)
-            }
+            mutateRms(generation, normalizedRms)
         }
 
         override fun onDetectedLanguage(languageTag: String) {
@@ -367,6 +365,22 @@ class CaptureViewModel(
         mutateDraft { currentCoordinator ->
             if (generation == speechSessionGeneration.get()) {
                 mutation(currentCoordinator)
+            }
+        }
+    }
+
+    private fun mutateRms(generation: Long, normalizedRms: Float) {
+        if (generation != speechSessionGeneration.get()) return
+        viewModelScope.launch {
+            val currentCoordinator = awaitCoordinator() ?: return@launch
+            eventMutex.withLock {
+                if (
+                    terminalCompletion ||
+                    generation != speechSessionGeneration.get()
+                ) {
+                    return@withLock
+                }
+                currentCoordinator.onSpeechRms(normalizedRms)
             }
         }
     }

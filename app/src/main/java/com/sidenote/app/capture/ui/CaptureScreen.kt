@@ -16,21 +16,21 @@ import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.selection.LocalTextSelectionColors
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.semantics.SemanticsPropertyKey
-import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDirection
@@ -41,18 +41,21 @@ import com.sidenote.app.capture.CaptureState
 import com.sidenote.app.data.markdown.ProjectSyntax
 
 const val CAPTURE_ROOT_TAG = "capture-root"
+const val CAPTURE_BLOB_REGION_TAG = "capture-blob-region"
+const val CAPTURE_WRITING_REGION_TAG = "capture-writing-region"
 const val CAPTURE_CARD_TAG = "capture-card"
 const val CAPTURE_INPUT_TAG = "capture-input"
 const val PROJECT_CHIP_TAG_PREFIX = "project-chip"
 
-val CaptureCardCornerRadius = SemanticsPropertyKey<Float>("Capture card corner radius dp")
 val LocalReducedMotion = staticCompositionLocalOf { false }
 
-private val Background = Color(0xFF050505)
-private val Paper = Color(0xFFF3F0E8)
-private val Ink = Color(0xFF0A0A0A)
-private val MutedInk = Color(0xFF5E5C57)
-private val Chip = Color(0xFF252525)
+@Composable
+internal fun CaptureSelectionScope(content: @Composable () -> Unit) {
+    CompositionLocalProvider(
+        LocalTextSelectionColors provides CaptureVisualContract.TextSelectionColors,
+        content = content,
+    )
+}
 
 @Composable
 fun CaptureScreen(
@@ -61,65 +64,73 @@ fun CaptureScreen(
     onVoiceToggle: () -> Unit,
     onDiscard: () -> Unit,
 ) {
-    val projects = ProjectSyntax.tokens(state.draft.text)
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Background)
-            .testTag(CAPTURE_ROOT_TAG)
-            .windowInsetsPadding(WindowInsets.safeDrawing),
-        horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .weight(1f),
-            contentAlignment = Alignment.Center,
-        ) {
-            VoiceBlob(
-                enabled = state.voiceEnabled,
-                rms = state.rms,
-                reducedMotion = LocalReducedMotion.current,
-                onToggle = onVoiceToggle,
-            )
+    CaptureSelectionScope {
+        val projects = remember(state.draft.text) {
+            ProjectSyntax.tokens(state.draft.text)
         }
         Column(
             modifier = Modifier
-                .fillMaxWidth()
-                .weight(1f)
-                .verticalScroll(rememberScrollState())
-                .padding(bottom = 12.dp),
+                .fillMaxSize()
+                .background(CaptureVisualContract.Background)
+                .testTag(CAPTURE_ROOT_TAG)
+                .windowInsetsPadding(WindowInsets.safeDrawing),
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Top,
         ) {
-            if (projects.isNotEmpty()) {
-                FlowRow(
-                    modifier = Modifier
-                        .fillMaxWidth(0.84f)
-                        .padding(bottom = 8.dp),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp),
-                ) {
-                    projects.forEach { project ->
-                        ProjectChip(project.display)
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(CaptureVisualContract.UpperRegionWeight)
+                    .testTag(CAPTURE_BLOB_REGION_TAG),
+                contentAlignment = Alignment.Center,
+            ) {
+                VoiceBlob(
+                    enabled = state.voiceEnabled,
+                    rms = state.rms,
+                    reducedMotion = LocalReducedMotion.current,
+                    onToggle = onVoiceToggle,
+                )
+            }
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(CaptureVisualContract.LowerRegionWeight)
+                    .testTag(CAPTURE_WRITING_REGION_TAG)
+                    .verticalScroll(rememberScrollState())
+                    .padding(bottom = 12.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Top,
+            ) {
+                if (projects.isNotEmpty()) {
+                    FlowRow(
+                        modifier = Modifier
+                            .fillMaxWidth(CaptureVisualContract.CardWidthFraction)
+                            .padding(bottom = 8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        projects.forEach { project ->
+                            ProjectChip(project.display)
+                        }
                     }
                 }
-            }
-            WritingCard(
-                state = state,
-                onTextChanged = onTextChanged,
-            )
-            if (state.draft.text.isNotEmpty()) {
-                Spacer(Modifier.height(8.dp))
-                TextButton(
-                    onClick = onDiscard,
-                    modifier = Modifier.heightIn(min = 48.dp),
-                    colors = ButtonDefaults.textButtonColors(contentColor = Paper),
-                ) {
-                    Text(
-                        text = stringResource(R.string.discard),
-                        fontSize = 16.sp,
-                    )
+                WritingCard(
+                    state = state,
+                    onTextChanged = onTextChanged,
+                )
+                if (state.draft.text.isNotEmpty()) {
+                    Spacer(Modifier.height(8.dp))
+                    TextButton(
+                        onClick = onDiscard,
+                        modifier = Modifier.heightIn(min = 48.dp),
+                        colors = ButtonDefaults.textButtonColors(
+                            contentColor = CaptureVisualContract.Paper,
+                        ),
+                    ) {
+                        Text(
+                            text = stringResource(R.string.discard),
+                            fontSize = 16.sp,
+                        )
+                    }
                 }
             }
         }
@@ -133,13 +144,12 @@ private fun WritingCard(
 ) {
     Surface(
         modifier = Modifier
-            .fillMaxWidth(0.84f)
-            .heightIn(min = 144.dp)
-            .testTag(CAPTURE_CARD_TAG)
-            .semantics { this[CaptureCardCornerRadius] = 4f },
-        color = Paper,
-        contentColor = Ink,
-        shape = androidx.compose.foundation.shape.RoundedCornerShape(4.dp),
+            .fillMaxWidth(CaptureVisualContract.CardWidthFraction)
+            .heightIn(min = CaptureVisualContract.CardMinimumHeight)
+            .testTag(CAPTURE_CARD_TAG),
+        color = CaptureVisualContract.Paper,
+        contentColor = CaptureVisualContract.Ink,
+        shape = CaptureVisualContract.CardShape,
     ) {
         Box(
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
@@ -147,7 +157,7 @@ private fun WritingCard(
             if (state.draft.text.isEmpty()) {
                 Text(
                     text = stringResource(R.string.capture_placeholder),
-                    color = MutedInk,
+                    color = CaptureVisualContract.MutedInk,
                     fontSize = 18.sp,
                     textAlign = TextAlign.Start,
                     style = TextStyle(textDirection = TextDirection.Content),
@@ -161,13 +171,13 @@ private fun WritingCard(
                     .heightIn(min = 116.dp, max = 224.dp)
                     .testTag(CAPTURE_INPUT_TAG),
                 textStyle = TextStyle(
-                    color = Ink,
+                    color = CaptureVisualContract.Ink,
                     fontSize = 18.sp,
                     lineHeight = 25.sp,
                     textAlign = TextAlign.Start,
                     textDirection = TextDirection.Content,
                 ),
-                cursorBrush = SolidColor(Ink),
+                cursorBrush = SolidColor(CaptureVisualContract.Ink),
                 minLines = 4,
                 maxLines = 8,
             )
@@ -179,8 +189,8 @@ private fun WritingCard(
 private fun ProjectChip(project: String) {
     Surface(
         modifier = Modifier.testTag("$PROJECT_CHIP_TAG_PREFIX.$project"),
-        color = Chip,
-        contentColor = Paper,
+        color = CaptureVisualContract.Chip,
+        contentColor = CaptureVisualContract.Paper,
         shape = androidx.compose.foundation.shape.RoundedCornerShape(50),
     ) {
         Text(

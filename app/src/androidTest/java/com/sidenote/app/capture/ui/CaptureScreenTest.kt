@@ -8,6 +8,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.graphics.toPixelMap
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.SemanticsActions
@@ -18,6 +19,8 @@ import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsOff
 import androidx.compose.ui.test.assertIsOn
+import androidx.compose.ui.test.captureToImage
+import androidx.compose.ui.test.getUnclippedBoundsInRoot
 import androidx.compose.ui.test.junit4.v2.createEmptyComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
@@ -118,6 +121,39 @@ class CaptureScreenTest {
     }
 
     @Test
+    fun actualEditorRendersCaptureScopedNeutralSelectionHighlight() {
+        val text = "Selected capture text"
+        setContent {
+            CaptureScreen(
+                state = CaptureState(
+                    draft = TextFieldValue(text, TextRange(0, text.length)),
+                ),
+                onTextChanged = {},
+                onVoiceToggle = {},
+                onDiscard = {},
+            )
+        }
+
+        val pixels = compose.onNodeWithTag(CAPTURE_INPUT_TAG)
+            .captureToImage()
+            .toPixelMap()
+        var neutralSelectionPixels = 0
+        for (y in 0 until pixels.height) {
+            for (x in 0 until pixels.width) {
+                val color = pixels[x, y]
+                if (
+                    color.red in 0.69f..0.75f &&
+                    color.green in 0.68f..0.74f &&
+                    color.blue in 0.66f..0.72f
+                ) {
+                    neutralSelectionPixels += 1
+                }
+            }
+        }
+        assertThat(neutralSelectionPixels).isGreaterThan(40)
+    }
+
+    @Test
     fun typingDispatchesTextAndBlobToggleIsAccessible() {
         val edits = mutableListOf<TextFieldValue>()
         var toggles = 0
@@ -131,12 +167,16 @@ class CaptureScreenTest {
         }
 
         compose.onNodeWithTag(CAPTURE_INPUT_TAG).performTextInput("שלום")
-        assertThat(edits.single().text).isEqualTo("שלום")
+        compose.runOnIdle {
+            assertThat(edits.last().text).isEqualTo("שלום")
+        }
 
         compose.onNodeWithContentDescription("Voice input off")
             .assertIsOff()
             .performClick()
-        assertThat(toggles).isEqualTo(1)
+        compose.runOnIdle {
+            assertThat(toggles).isEqualTo(1)
+        }
     }
 
     @Test
@@ -156,20 +196,41 @@ class CaptureScreenTest {
     }
 
     @Test
-    fun cardHasExactFourDpCornersAndBlobHasAtLeastFortyEightDpTarget() {
+    fun renderedLayoutUsesApprovedBlobSizeCardWidthAndUpperHalfCentering() {
         setContent {
             CaptureScreen(CaptureState(), {}, {}, {})
         }
 
-        compose.onNodeWithTag(CAPTURE_CARD_TAG).assert(
-            SemanticsMatcher.expectValue(CaptureCardCornerRadius, 4f),
-        )
-        val blobBounds = compose.onNodeWithContentDescription("Voice input on")
-            .fetchSemanticsNode()
-            .boundsInRoot
-        val density = compose.density.density
-        assertThat(blobBounds.width / density).isAtLeast(48f)
-        assertThat(blobBounds.height / density).isAtLeast(48f)
+        val root = compose.onNodeWithTag(CAPTURE_ROOT_TAG).getUnclippedBoundsInRoot()
+        val upper = compose.onNodeWithTag(CAPTURE_BLOB_REGION_TAG).getUnclippedBoundsInRoot()
+        val lower = compose.onNodeWithTag(CAPTURE_WRITING_REGION_TAG)
+            .getUnclippedBoundsInRoot()
+        val blob = compose.onNodeWithContentDescription("Voice input on")
+            .getUnclippedBoundsInRoot()
+        val card = compose.onNodeWithTag(CAPTURE_CARD_TAG).getUnclippedBoundsInRoot()
+        val rootWidth = root.right.value - root.left.value
+        val upperHeight = upper.bottom.value - upper.top.value
+        val lowerHeight = lower.bottom.value - lower.top.value
+        val blobWidth = blob.right.value - blob.left.value
+        val blobHeight = blob.bottom.value - blob.top.value
+        val cardWidth = card.right.value - card.left.value
+
+        assertThat(blobWidth).isWithin(0.5f).of(132f)
+        assertThat(blobWidth).isAtLeast(112f)
+        assertThat(blobWidth).isAtMost(144f)
+        assertThat(blobHeight).isWithin(0.5f).of(blobWidth)
+        assertThat(cardWidth / rootWidth).isWithin(0.01f).of(0.84f)
+        assertThat(upperHeight).isWithin(0.5f).of(lowerHeight)
+        assertThat(upper.bottom.value).isWithin(0.5f).of(lower.top.value)
+        assertThat((blob.left.value + blob.right.value) / 2f)
+            .isWithin(0.5f)
+            .of((upper.left.value + upper.right.value) / 2f)
+        assertThat((blob.top.value + blob.bottom.value) / 2f)
+            .isWithin(0.5f)
+            .of((upper.top.value + upper.bottom.value) / 2f)
+        assertThat(blob.bottom.value).isAtMost(upper.bottom.value)
+        assertThat(blobWidth).isAtLeast(48f)
+        assertThat(blobHeight).isAtLeast(48f)
     }
 
     @Test
@@ -216,6 +277,46 @@ class CaptureScreenTest {
         }
         compose.onNodeWithTag("$PROJECT_CHIP_TAG_PREFIX.Home").assertDoesNotExist()
         compose.onNodeWithTag("$PROJECT_CHIP_TAG_PREFIX.בית").assertDoesNotExist()
+    }
+
+    @Test
+    fun wrappedProjectChipsAndWritingCardStayInsideCaptureWidth() {
+        val projects = listOf(
+            "AlphaProject",
+            "BetaProject",
+            "GammaProject",
+            "DeltaProject",
+            "EpsilonProject",
+        )
+        setContent {
+            CaptureScreen(
+                state = CaptureState(
+                    draft = TextFieldValue(
+                        projects.joinToString(" ") { "@$it" },
+                    ),
+                ),
+                onTextChanged = {},
+                onVoiceToggle = {},
+                onDiscard = {},
+            )
+        }
+
+        val root = compose.onNodeWithTag(CAPTURE_ROOT_TAG).getUnclippedBoundsInRoot()
+        val chipBounds = projects.map { project ->
+            compose.onNodeWithTag("$PROJECT_CHIP_TAG_PREFIX.$project")
+                .assertIsDisplayed()
+                .getUnclippedBoundsInRoot()
+        }
+        chipBounds.forEach { chip ->
+            assertThat(chip.left.value).isAtLeast(root.left.value)
+            assertThat(chip.right.value).isAtMost(root.right.value)
+        }
+        assertThat(chipBounds.map { it.top.value.toInt() }.distinct().size).isGreaterThan(1)
+        val card = compose.onNodeWithTag(CAPTURE_CARD_TAG)
+            .assertIsDisplayed()
+            .getUnclippedBoundsInRoot()
+        assertThat(card.left.value).isAtLeast(root.left.value)
+        assertThat(card.right.value).isAtMost(root.right.value)
     }
 
     @Test

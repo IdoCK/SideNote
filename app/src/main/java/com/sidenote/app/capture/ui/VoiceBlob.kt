@@ -7,7 +7,6 @@ import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.res.stringResource
@@ -33,9 +32,36 @@ data class BlobGeometry(
     val isCircle: Boolean
         get() = radiusScales.all { it == 1f }
 
+    val cubicSegments: List<BlobCubicSegment>
+        get() {
+            val anchors = radiusScales.mapIndexed { index, scale ->
+                val angle = TWO_PI * index / POINT_COUNT
+                BlobPoint(
+                    x = cos(angle) * scale,
+                    y = sin(angle) * scale,
+                )
+            }
+            return anchors.mapIndexed { index, current ->
+                val previous = anchors[(index - 1 + anchors.size) % anchors.size]
+                val next = anchors[(index + 1) % anchors.size]
+                val following = anchors[(index + 2) % anchors.size]
+                BlobCubicSegment(
+                    start = current,
+                    control1 = BlobPoint(
+                        x = current.x + (next.x - previous.x) / 6f,
+                        y = current.y + (next.y - previous.y) / 6f,
+                    ).bounded(),
+                    control2 = BlobPoint(
+                        x = next.x - (following.x - current.x) / 6f,
+                        y = next.y - (following.y - current.y) / 6f,
+                    ).bounded(),
+                    end = next,
+                )
+            }
+        }
+
     companion object {
-        const val POINT_COUNT = 16
-        private const val SPEECH_THRESHOLD = 0.08f
+        const val POINT_COUNT = CaptureVisualContract.BlobPointCount
 
         fun from(
             rms: Float,
@@ -45,18 +71,36 @@ data class BlobGeometry(
         ): BlobGeometry {
             if (!enabled) return circle(BlobPaint.Hollow)
             val normalizedRms = rms.takeIf(Float::isFinite)?.coerceIn(0f, 1f) ?: 0f
-            if (reducedMotion || normalizedRms <= SPEECH_THRESHOLD) {
+            if (
+                reducedMotion ||
+                normalizedRms <= CaptureVisualContract.BlobSpeechThreshold
+            ) {
                 return circle(BlobPaint.Filled)
             }
 
-            val speech = ((normalizedRms - SPEECH_THRESHOLD) / (1f - SPEECH_THRESHOLD))
-                .coerceIn(0f, 1f)
-            val baseScale = 1f + (0.02f * speech)
-            val lobeScale = 0.06f * speech
+            val speech = (
+                (normalizedRms - CaptureVisualContract.BlobSpeechThreshold) /
+                    (1f - CaptureVisualContract.BlobSpeechThreshold)
+                ).coerceIn(0f, 1f)
+            val fullSpeechBaseScale =
+                (CaptureVisualContract.BlobMinimumScale +
+                    CaptureVisualContract.BlobMaximumScale) / 2f
+            val fullSpeechLobeScale =
+                (CaptureVisualContract.BlobMaximumScale -
+                    CaptureVisualContract.BlobMinimumScale) / 2f
+            val baseScale = 1f + ((fullSpeechBaseScale - 1f) * speech)
+            val lobeScale = fullSpeechLobeScale * speech
             return BlobGeometry(
                 radiusScales = List(POINT_COUNT) { index ->
                     val angle = TWO_PI * index / POINT_COUNT
-                    baseScale + lobeScale * cos((4f * angle) + phase)
+                    (
+                        baseScale + lobeScale * cos(
+                            (CaptureVisualContract.BlobLobeCount * angle) + phase,
+                        )
+                        ).coerceIn(
+                        CaptureVisualContract.BlobMinimumScale,
+                        CaptureVisualContract.BlobMaximumScale,
+                    )
                 },
                 paint = BlobPaint.Filled,
             )
@@ -70,6 +114,29 @@ data class BlobGeometry(
         private const val TWO_PI = (2.0 * PI).toFloat()
     }
 }
+
+data class BlobPoint(
+    val x: Float,
+    val y: Float,
+)
+
+data class BlobCubicSegment(
+    val start: BlobPoint,
+    val control1: BlobPoint,
+    val control2: BlobPoint,
+    val end: BlobPoint,
+)
+
+private fun BlobPoint.bounded(): BlobPoint = BlobPoint(
+    x = x.coerceIn(
+        -CaptureVisualContract.BlobMaximumScale,
+        CaptureVisualContract.BlobMaximumScale,
+    ),
+    y = y.coerceIn(
+        -CaptureVisualContract.BlobMaximumScale,
+        CaptureVisualContract.BlobMaximumScale,
+    ),
+)
 
 @Composable
 fun VoiceBlob(
@@ -90,7 +157,7 @@ fun VoiceBlob(
     Canvas(
         modifier = Modifier
             .minimumInteractiveComponentSize()
-            .size(132.dp)
+            .size(CaptureVisualContract.BlobSize)
             .toggleable(
                 value = enabled,
                 role = Role.Switch,
@@ -99,14 +166,16 @@ fun VoiceBlob(
             .semantics { contentDescription = description },
     ) {
         val strokeWidth = 3.dp.toPx()
-        val baseRadius = (min(size.width, size.height) / 2f - strokeWidth) / MAX_SCALE
+        val baseRadius =
+            (min(size.width, size.height) / 2f - strokeWidth) /
+                CaptureVisualContract.BlobMaximumScale
         val center = this.center
         if (geometry.isCircle) {
             drawCircle(
                 color = if (geometry.paint == BlobPaint.Filled) {
-                    EnabledBlob
+                    CaptureVisualContract.EnabledBlob
                 } else {
-                    DisabledBlob
+                    CaptureVisualContract.DisabledBlob
                 },
                 radius = baseRadius,
                 center = center,
@@ -117,42 +186,37 @@ fun VoiceBlob(
                 },
             )
         } else {
-            val points = geometry.radiusScales.mapIndexed { index, scale ->
-                val angle = TWO_PI * index / BlobGeometry.POINT_COUNT
-                Offset(
-                    x = center.x + cos(angle) * baseRadius * scale,
-                    y = center.y + sin(angle) * baseRadius * scale,
-                )
-            }
             drawPath(
-                path = points.toClosedCubicPath(),
-                color = EnabledBlob,
+                path = geometry.cubicSegments.toPath(center, baseRadius),
+                color = CaptureVisualContract.EnabledBlob,
             )
         }
     }
 }
 
-private fun List<Offset>.toClosedCubicPath(): Path = Path().apply {
+private fun List<BlobCubicSegment>.toPath(center: Offset, radius: Float): Path = Path().apply {
     if (isEmpty()) return@apply
-    moveTo(first().x, first().y)
-    indices.forEach { index ->
-        val previous = get((index - 1 + size) % size)
-        val current = get(index)
-        val next = get((index + 1) % size)
-        val following = get((index + 2) % size)
+    val first = first().start.toOffset(center, radius)
+    moveTo(first.x, first.y)
+    forEach { segment ->
+        val control1 = segment.control1.toOffset(center, radius)
+        val control2 = segment.control2.toOffset(center, radius)
+        val end = segment.end.toOffset(center, radius)
         cubicTo(
-            current.x + (next.x - previous.x) / 6f,
-            current.y + (next.y - previous.y) / 6f,
-            next.x - (following.x - current.x) / 6f,
-            next.y - (following.y - current.y) / 6f,
-            next.x,
-            next.y,
+            control1.x,
+            control1.y,
+            control2.x,
+            control2.y,
+            end.x,
+            end.y,
         )
     }
     close()
 }
 
-private val EnabledBlob = Color(0xFFD8D6D0)
-private val DisabledBlob = Color(0xFF626262)
-private const val MAX_SCALE = 1.08f
+private fun BlobPoint.toOffset(center: Offset, radius: Float): Offset = Offset(
+    x = center.x + x * radius,
+    y = center.y + y * radius,
+)
+
 private const val TWO_PI = (2.0 * PI).toFloat()

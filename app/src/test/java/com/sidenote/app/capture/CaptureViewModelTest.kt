@@ -23,8 +23,10 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import org.junit.After
@@ -92,11 +94,60 @@ class CaptureViewModelTest {
         assertThat(viewModel.state.value.rms).isEqualTo(0f)
     }
 
+    @Test
+    fun sustainedRmsDoesNotRescheduleCancelOrDuplicateRecoveryOfSpeechDraft() =
+        runTest(mainDispatcher) {
+            val speech = SessionRecordingSpeechEngine()
+            val recovery = RecordingRecoveryStore()
+            val viewModel = viewModel(speech, this, recovery)
+            viewModel.start(Intent())
+            viewModel.onCaptureStarted()
+            advanceUntilIdle()
+            val listener = speech.listeners.single()
+
+            listener.onPartial("@Home persist")
+            runCurrent()
+            repeat(5) { index ->
+                advanceTimeBy(40)
+                listener.onRms((index + 1) / 10f)
+                runCurrent()
+            }
+            advanceTimeBy(49)
+            runCurrent()
+            assertThat(recovery.saved).isEmpty()
+
+            advanceTimeBy(1)
+            runCurrent()
+
+            assertThat(recovery.saved).containsExactly(
+                RecoveryDraft(
+                    text = "@Home persist",
+                    selection = TextRange(13),
+                    voiceEnabled = true,
+                ),
+            )
+
+            repeat(5) { index ->
+                listener.onRms((index + 5) / 10f)
+                advanceTimeBy(40)
+                runCurrent()
+            }
+            advanceTimeBy(500)
+            runCurrent()
+            assertThat(recovery.saved).containsExactly(
+                RecoveryDraft(
+                    text = "@Home persist",
+                    selection = TextRange(13),
+                    voiceEnabled = true,
+                ),
+            )
+        }
+
     private fun viewModel(
         speech: SpeechEngine,
         recoveryScope: CoroutineScope,
+        recovery: RecoveryDraftStore = EmptyRecoveryStore(),
     ): CaptureViewModel {
-        val recovery = EmptyRecoveryStore()
         return CaptureViewModel(
             CaptureDependencies(
                 settings = FixedSettingsRepository(),
@@ -153,6 +204,18 @@ private class EmptyRecoveryStore : RecoveryDraftStore {
     override suspend fun load(): RecoveryLoadResult = RecoveryLoadResult.Empty
 
     override suspend fun save(draft: RecoveryDraft) = Unit
+
+    override suspend fun clear() = Unit
+}
+
+private class RecordingRecoveryStore : RecoveryDraftStore {
+    val saved = mutableListOf<RecoveryDraft>()
+
+    override suspend fun load(): RecoveryLoadResult = RecoveryLoadResult.Empty
+
+    override suspend fun save(draft: RecoveryDraft) {
+        saved += draft
+    }
 
     override suspend fun clear() = Unit
 }
