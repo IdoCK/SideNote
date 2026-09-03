@@ -1,9 +1,7 @@
 package com.sidenote.app
 
 import android.Manifest
-import android.app.KeyguardManager
 import android.app.NotificationManager
-import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
@@ -12,10 +10,11 @@ import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.material3.Text
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -28,20 +27,31 @@ import com.sidenote.app.data.documents.TreePermissionOutcome
 import com.sidenote.app.navigation.PermissionState
 import com.sidenote.app.navigation.SideNoteMainViewModel
 import com.sidenote.app.navigation.SideNoteNavHost
+import com.sidenote.app.privacy.LockState
+import com.sidenote.app.privacy.UnlockGate
 import com.sidenote.app.review.ReviewViewModel
 import com.sidenote.app.ui.theme.SideNoteTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
+    private lateinit var container: AppContainer
+    private lateinit var lockState: LockState
     private lateinit var mainViewModel: SideNoteMainViewModel
+    private lateinit var reviewViewModel: ReviewViewModel
     private val permissionState = mutableStateOf(PermissionState())
+    private val protectedContentReady = mutableStateOf(false)
+    private val setupUnavailable = mutableStateOf(false)
+    private var dismissRequested = false
+    private var pendingMostRecentUnprocessed = false
 
     private val folderPicker = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult(),
     ) { result ->
         val uri = result.data?.data
-        if (result.resultCode != RESULT_OK || uri == null) return@registerForActivityResult
+        if (result.resultCode != RESULT_OK || uri == null || !::mainViewModel.isInitialized) {
+            return@registerForActivityResult
+        }
         val grantedFlags = result.data?.flags ?: 0
         lifecycleScope.launch(Dispatchers.IO) {
             when (SafTreePermission.persist(contentResolver, uri, grantedFlags)) {
@@ -53,7 +63,7 @@ class MainActivity : ComponentActivity() {
     private val permissionsLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
     ) {
-        refreshPermissionState()
+        if (::mainViewModel.isInitialized && !lockState.locked.value) refreshPermissionState()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -62,68 +72,157 @@ class MainActivity : ComponentActivity() {
             statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
             navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
         )
-        val dependencies = (application as SideNoteApplication).container.mainDependencies()
+        container = (application as SideNoteApplication).container
+        lockState = container.lockState()
+        pendingMostRecentUnprocessed =
+            savedInstanceState?.getBoolean(STATE_PENDING_UNPROCESSED, false) == true
+        consumeNotificationDestination(intent)
+        lockState.refresh()
+        setShowWhenLocked(lockState.locked.value)
+        if (!lockState.locked.value) initializeProtectedContent()
+
+        setContent {
+            SideNoteTheme {
+                val locked by lockState.locked.collectAsState()
+                LaunchedEffect(locked) {
+                    if (locked) {
+                        requestDismissalOnce()
+                    } else {
+                        dismissRequested = false
+                        setShowWhenLocked(false)
+                        initializeProtectedContent()
+                    }
+                }
+                if (locked || !protectedContentReady.value) {
+                    UnlockGate()
+                } else if (setupUnavailable.value) {
+                    Text("Setup")
+                } else {
+                    ProtectedContent()
+                }
+            }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        consumeNotificationDestination(intent)
+        if (::lockState.isInitialized) {
+            lockState.refresh()
+            if (lockState.locked.value) {
+                setShowWhenLocked(true)
+                requestDismissalOnce()
+            } else {
+                routePendingDestination()
+            }
+        }
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putBoolean(STATE_PENDING_UNPROCESSED, pendingMostRecentUnprocessed)
+        super.onSaveInstanceState(outState)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (!::lockState.isInitialized) return
+        lockState.refresh()
+        if (!lockState.locked.value && ::mainViewModel.isInitialized) refreshPermissionState()
+    }
+
+    @Composable
+    private fun ProtectedContent() {
+        val mainState by mainViewModel.state.collectAsState()
+        val reviewState by reviewViewModel.state.collectAsState()
+        val settings = mainState.settings
+        LaunchedEffect(settings?.treeUri, settings?.onboardingComplete) {
+            settings?.let { current ->
+                reviewViewModel.onDocumentSourceObserved(
+                    treeUri = current.treeUri?.toString(),
+                    onboardingComplete = current.onboardingComplete,
+                )
+            }
+        }
+        SideNoteNavHost(
+            mainState = mainState,
+            reviewState = reviewState,
+            permissions = permissionState.value,
+            onChooseFolder = ::launchFolderPickerAfterUnlock,
+            onRequestPermissions = ::requestPermissionsAfterUnlock,
+            onContinueOnboarding = mainViewModel::continueOnboarding,
+            onAcceptVoiceDisclosure = mainViewModel::acceptVoiceDisclosure,
+            onVoiceOnAtLaunchChange = mainViewModel::setVoiceOnAtLaunch,
+            onOnlineFallbackChange = mainViewModel::setOnlineFallbackAllowed,
+            onCheckSpeech = mainViewModel::checkSpeechSupport,
+            onDownloadModels = mainViewModel::requestModelDownloads,
+            onShowDates = reviewViewModel::showDates,
+            onShowProjects = reviewViewModel::showProjects,
+            onPreviousDay = reviewViewModel::previousDay,
+            onNextDay = reviewViewModel::nextDay,
+            onToggleExpanded = reviewViewModel::toggleExpanded,
+            onProcessedChange = reviewViewModel::setProcessed,
+            onOpenProject = reviewViewModel::openProject,
+            onOpenSourceDay = reviewViewModel::openSourceDay,
+            modifier = Modifier.windowInsetsPadding(WindowInsets.safeDrawing),
+        )
+    }
+
+    private fun initializeProtectedContent() {
+        if (protectedContentReady.value) {
+            routePendingDestination()
+            return
+        }
+        val dependencies = container.mainDependencies()
         if (dependencies == null) {
-            setContent { SideNoteTheme { Text("Setup") } }
+            setupUnavailable.value = true
+            protectedContentReady.value = true
             return
         }
         mainViewModel = ViewModelProvider(
             this,
             SideNoteMainViewModel.Factory(dependencies),
         )[SideNoteMainViewModel::class.java]
-        val reviewViewModel = ViewModelProvider(
+        reviewViewModel = ViewModelProvider(
             this,
-            ReviewViewModel.Factory(dependencies.repository, dependencies.ioDispatcher),
+            ReviewViewModel.Factory(
+                dependencies.repository,
+                dependencies.ioDispatcher,
+                dependencies.notificationRefresher,
+            ),
         )[ReviewViewModel::class.java]
         refreshPermissionState()
+        protectedContentReady.value = true
+        routePendingDestination()
+    }
 
-        setContent {
-            SideNoteTheme {
-                val mainState by mainViewModel.state.collectAsState()
-                val reviewState by reviewViewModel.state.collectAsState()
-                val settings = mainState.settings
-                LaunchedEffect(settings?.treeUri, settings?.onboardingComplete) {
-                    settings?.let { current ->
-                        reviewViewModel.onDocumentSourceObserved(
-                            treeUri = current.treeUri?.toString(),
-                            onboardingComplete = current.onboardingComplete,
-                        )
-                    }
-                }
-                SideNoteNavHost(
-                    mainState = mainState,
-                    reviewState = reviewState,
-                    permissions = permissionState.value,
-                    onChooseFolder = ::launchFolderPickerAfterUnlock,
-                    onRequestPermissions = ::requestPermissionsAfterUnlock,
-                    onContinueOnboarding = mainViewModel::continueOnboarding,
-                    onAcceptVoiceDisclosure = mainViewModel::acceptVoiceDisclosure,
-                    onVoiceOnAtLaunchChange = mainViewModel::setVoiceOnAtLaunch,
-                    onOnlineFallbackChange = mainViewModel::setOnlineFallbackAllowed,
-                    onCheckSpeech = mainViewModel::checkSpeechSupport,
-                    onDownloadModels = mainViewModel::requestModelDownloads,
-                    onShowDates = reviewViewModel::showDates,
-                    onShowProjects = reviewViewModel::showProjects,
-                    onPreviousDay = reviewViewModel::previousDay,
-                    onNextDay = reviewViewModel::nextDay,
-                    onToggleExpanded = reviewViewModel::toggleExpanded,
-                    onProcessedChange = reviewViewModel::setProcessed,
-                    onOpenProject = reviewViewModel::openProject,
-                    onOpenSourceDay = reviewViewModel::openSourceDay,
-                    modifier = Modifier.windowInsetsPadding(WindowInsets.safeDrawing),
-                )
-            }
+    private fun consumeNotificationDestination(intent: Intent?) {
+        if (intent?.getBooleanExtra(EXTRA_OPEN_MOST_RECENT_UNPROCESSED, false) == true) {
+            pendingMostRecentUnprocessed = true
+            intent.removeExtra(EXTRA_OPEN_MOST_RECENT_UNPROCESSED)
         }
     }
 
-    override fun onResume() {
-        super.onResume()
-        if (::mainViewModel.isInitialized) refreshPermissionState()
+    private fun routePendingDestination() {
+        if (!pendingMostRecentUnprocessed || !::reviewViewModel.isInitialized || lockState.locked.value) {
+            return
+        }
+        pendingMostRecentUnprocessed = false
+        reviewViewModel.openMostRecentUnprocessed()
+    }
+
+    private fun requestDismissalOnce() {
+        if (dismissRequested || !lockState.locked.value) return
+        dismissRequested = true
+        lockState.requestDismissKeyguard(this)
     }
 
     private fun launchFolderPickerAfterUnlock() {
-        if (deviceLocked()) {
+        lockState.refresh()
+        if (lockState.locked.value) {
             mainViewModel.onProtectedActionBlocked()
+            setShowWhenLocked(true)
+            requestDismissalOnce()
             return
         }
         folderPicker.launch(
@@ -136,8 +235,11 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun requestPermissionsAfterUnlock() {
-        if (deviceLocked()) {
+        lockState.refresh()
+        if (lockState.locked.value) {
             mainViewModel.onProtectedActionBlocked()
+            setShowWhenLocked(true)
+            requestDismissalOnce()
             return
         }
         permissionsLauncher.launch(
@@ -159,6 +261,8 @@ class MainActivity : ComponentActivity() {
         )
     }
 
-    private fun deviceLocked(): Boolean =
-        (getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager).isDeviceLocked
+    companion object {
+        const val EXTRA_OPEN_MOST_RECENT_UNPROCESSED = "open_most_recent_unprocessed"
+        private const val STATE_PENDING_UNPROCESSED = "pending_most_recent_unprocessed"
+    }
 }

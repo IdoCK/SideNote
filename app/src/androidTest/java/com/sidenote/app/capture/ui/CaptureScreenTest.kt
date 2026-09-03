@@ -408,7 +408,7 @@ private object UiSettingsRepository : SettingsRepository {
         AppSettings(
             treeUri = null,
             voiceOnAtLaunch = false,
-            onboardingComplete = false,
+            onboardingComplete = true,
         ),
     )
 

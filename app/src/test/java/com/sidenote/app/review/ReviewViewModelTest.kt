@@ -10,6 +10,8 @@ import com.sidenote.app.data.markdown.EntrySource
 import com.sidenote.app.data.markdown.MarkdownCodec
 import com.sidenote.app.data.markdown.ParsedDailyFile
 import com.sidenote.app.data.markdown.RewriteResult
+import com.sidenote.app.notification.NotificationRefreshResult
+import com.sidenote.app.notification.NotificationRefresher
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
@@ -413,6 +415,65 @@ class ReviewViewModelTest {
     }
 
     @Test
+    fun successfulCheckboxWriteRefreshesNotificationOnceFromUpdatedMarkdown() =
+        runTest(mainDispatcher) {
+            val repository = FakeDocumentRepository(
+                listOf(day("2026-08-27", "- [ ] **09:00** process me")),
+            )
+            val refresher = RecordingNotificationRefresher().apply {
+                onRefresh = {
+                    assertThat(repository.updates).hasSize(1)
+                    assertThat(repository.days.single().entries.single().processed).isTrue()
+                }
+            }
+            val viewModel = ReviewViewModel(repository, mainDispatcher, refresher)
+            advanceUntilIdle()
+
+            viewModel.setProcessed(viewModel.state.value.days.single().entries.single(), true)
+            advanceUntilIdle()
+
+            assertThat(refresher.refreshCalls).isEqualTo(1)
+        }
+
+    @Test
+    fun failedOrConflictingCheckboxWritesNeverRefreshNotification() = runTest(mainDispatcher) {
+        listOf(
+            UpdateResult.Conflict,
+            UpdateResult.Failure(RepositoryError.WriteFailed),
+        ).forEach { updateResult ->
+            val repository = FakeDocumentRepository(
+                listOf(day("2026-08-27", "- [ ] **09:00** unchanged")),
+            ).apply { nextUpdate = updateResult }
+            val refresher = RecordingNotificationRefresher()
+            val viewModel = ReviewViewModel(repository, mainDispatcher, refresher)
+            advanceUntilIdle()
+
+            viewModel.setProcessed(viewModel.state.value.days.single().entries.single(), true)
+            advanceUntilIdle()
+
+            assertThat(refresher.refreshCalls).isEqualTo(0)
+        }
+    }
+
+    @Test
+    fun notificationFolderLossAfterCheckboxWriteSurfacesRecoverableSettingsMessage() =
+        runTest(mainDispatcher) {
+            val repository = FakeDocumentRepository(
+                listOf(day("2026-08-27", "- [ ] **09:00** process me")),
+            )
+            val refresher = RecordingNotificationRefresher().apply {
+                result = NotificationRefreshResult.FolderPermissionLost
+            }
+            val viewModel = ReviewViewModel(repository, mainDispatcher, refresher)
+            advanceUntilIdle()
+
+            viewModel.setProcessed(viewModel.state.value.days.single().entries.single(), true)
+            advanceUntilIdle()
+
+            assertThat(viewModel.state.value.message).isEqualTo(ReviewMessage.FolderAccessLost)
+        }
+
+    @Test
     fun expansionIsInMemoryAndUsesTheCompleteSourceIdentity() = runTest(mainDispatcher) {
         val repository = FakeDocumentRepository(
             listOf(
@@ -500,4 +561,16 @@ private class FakeDocumentRepository(
 
     override suspend fun uncheckedCount(): Int =
         days.sumOf { day -> day.entries.count { entry -> !entry.processed } }
+}
+
+private class RecordingNotificationRefresher : NotificationRefresher {
+    var refreshCalls = 0
+    var result: NotificationRefreshResult = NotificationRefreshResult.Removed
+    var onRefresh: (() -> Unit)? = null
+
+    override suspend fun refresh(): NotificationRefreshResult {
+        refreshCalls += 1
+        onRefresh?.invoke()
+        return result
+    }
 }

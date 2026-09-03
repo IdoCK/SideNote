@@ -41,6 +41,7 @@ dependencies {
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.lifecycle.runtime.ktx)
     implementation(libs.material3)
+    implementation(libs.work.runtime.ktx)
 
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)

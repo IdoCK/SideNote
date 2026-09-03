@@ -12,6 +12,8 @@ import com.sidenote.app.data.markdown.ParsedDailyFile
 import com.sidenote.app.data.recovery.RecoveryDraft
 import com.sidenote.app.data.recovery.RecoveryDraftStore
 import com.sidenote.app.data.recovery.RecoveryLoadResult
+import com.sidenote.app.notification.NotificationRefreshResult
+import com.sidenote.app.notification.NotificationRefresher
 import java.time.Clock
 import java.time.Instant
 import java.time.ZoneId
@@ -33,6 +35,7 @@ class CaptureCoordinatorTest {
     private lateinit var speech: RecordingSpeechControl
     private lateinit var haptic: RecordingHapticConfirmation
     private lateinit var closer: RecordingCaptureCloser
+    private lateinit var notificationRefresher: RecordingNotificationRefresher
     private lateinit var coordinator: CaptureCoordinator
 
     @Before
@@ -42,6 +45,7 @@ class CaptureCoordinatorTest {
         speech = RecordingSpeechControl()
         haptic = RecordingHapticConfirmation()
         closer = RecordingCaptureCloser()
+        notificationRefresher = RecordingNotificationRefresher()
         coordinator = CaptureCoordinator(
             repository = repository,
             recovery = recovery,
@@ -51,6 +55,7 @@ class CaptureCoordinatorTest {
             speech = speech,
             haptic = haptic,
             closer = closer,
+            notificationRefresher = notificationRefresher,
         )
     }
 
@@ -332,6 +337,7 @@ class CaptureCoordinatorTest {
         assertThat(recovery.clearCalls).isEqualTo(0)
         assertThat(haptic.confirmCalls).isEqualTo(0)
         assertThat(closer.closeCalls).isEqualTo(0)
+        assertThat(notificationRefresher.refreshCalls).isEqualTo(0)
     }
 
     @Test
@@ -346,6 +352,39 @@ class CaptureCoordinatorTest {
         assertThat(recovery.clearCalls).isEqualTo(0)
         assertThat(haptic.confirmCalls).isEqualTo(0)
         assertThat(closer.closeCalls).isEqualTo(0)
+        assertThat(notificationRefresher.refreshCalls).isEqualTo(0)
+    }
+
+    @Test
+    fun confirmedAppendRefreshesNotificationExactlyOnceBeforeCompletionEffects() = runTest {
+        repository.beforeResult = { assertThat(notificationRefresher.refreshCalls).isEqualTo(0) }
+        notificationRefresher.onRefresh = {
+            assertThat(repository.appends).hasSize(1)
+            assertThat(recovery.clearCalls).isEqualTo(0)
+            assertThat(haptic.confirmCalls).isEqualTo(0)
+            assertThat(closer.closeCalls).isEqualTo(0)
+        }
+        coordinator.start(false, RecoveryDraft("refresh me", TextRange(10), false))
+
+        coordinator.complete(CompletionSignal.RepeatedLaunch)
+
+        assertThat(notificationRefresher.refreshCalls).isEqualTo(1)
+        assertThat(recovery.clearCalls).isEqualTo(1)
+        assertThat(haptic.confirmCalls).isEqualTo(1)
+        assertThat(closer.closeCalls).isEqualTo(1)
+    }
+
+    @Test
+    fun unavailableNotificationRefreshDoesNotUndoConfirmedAppend() = runTest {
+        notificationRefresher.failure = IllegalStateException("notifications unavailable")
+        coordinator.start(false, RecoveryDraft("still saved", TextRange(11), false))
+
+        coordinator.complete(CompletionSignal.RepeatedLaunch)
+
+        assertThat(coordinator.state.value.status).isEqualTo(CaptureStatus.Saved)
+        assertThat(notificationRefresher.refreshCalls).isEqualTo(1)
+        assertThat(recovery.clearCalls).isEqualTo(1)
+        assertThat(closer.closeCalls).isEqualTo(1)
     }
 
     @Test
@@ -550,5 +589,18 @@ private class RecordingCaptureCloser : CaptureCloser {
 
     override fun close() {
         closeCalls += 1
+    }
+}
+
+private class RecordingNotificationRefresher : NotificationRefresher {
+    var refreshCalls = 0
+    var onRefresh: (() -> Unit)? = null
+    var failure: RuntimeException? = null
+
+    override suspend fun refresh(): NotificationRefreshResult {
+        refreshCalls += 1
+        onRefresh?.invoke()
+        failure?.let { throw it }
+        return NotificationRefreshResult.Removed
     }
 }

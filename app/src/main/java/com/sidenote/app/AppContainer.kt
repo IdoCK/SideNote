@@ -10,6 +10,7 @@ import com.sidenote.app.capture.CaptureRecoveryHandoff
 import com.sidenote.app.capture.SpeechEngine
 import com.sidenote.app.data.documents.AppendResult
 import com.sidenote.app.data.documents.DocumentRepository
+import com.sidenote.app.data.documents.DocumentStoreException
 import com.sidenote.app.data.documents.MarkdownDocumentRepository
 import com.sidenote.app.data.documents.RepositoryError
 import com.sidenote.app.data.documents.SafTextDocumentStore
@@ -21,6 +22,16 @@ import com.sidenote.app.data.recovery.AtomicFileRecoveryDraftStore
 import com.sidenote.app.data.recovery.RecoveryDraftStore
 import com.sidenote.app.data.settings.DataStoreSettingsRepository
 import com.sidenote.app.data.settings.SettingsRepository
+import com.sidenote.app.notification.AndroidUnprocessedNotificationPublisher
+import com.sidenote.app.notification.NoOpNotificationRefreshScheduler
+import com.sidenote.app.notification.NotificationRefreshScheduler
+import com.sidenote.app.notification.NotificationRefresher
+import com.sidenote.app.notification.UnavailableNotificationRefresher
+import com.sidenote.app.notification.UnprocessedNotificationCoordinator
+import com.sidenote.app.notification.WorkManagerNotificationRefreshScheduler
+import com.sidenote.app.privacy.AndroidLockState
+import com.sidenote.app.privacy.LockState
+import com.sidenote.app.privacy.UnlockedLockState
 import java.io.File
 import java.time.Clock
 import java.time.Instant
@@ -38,6 +49,13 @@ interface AppContainer {
     fun captureDependencies(): CaptureDependencies
 
     fun mainDependencies(): MainDependencies? = null
+
+    fun notificationRefresher(): NotificationRefresher = UnavailableNotificationRefresher
+
+    fun notificationRefreshScheduler(): NotificationRefreshScheduler =
+        NoOpNotificationRefreshScheduler
+
+    fun lockState(): LockState = UnlockedLockState
 }
 
 data class MainDependencies(
@@ -45,6 +63,7 @@ data class MainDependencies(
     val repository: DocumentRepository,
     val speechFactory: (onlineFallbackAllowed: Boolean) -> SpeechEngine,
     val ioDispatcher: kotlinx.coroutines.CoroutineDispatcher,
+    val notificationRefresher: NotificationRefresher = UnavailableNotificationRefresher,
 )
 
 class ProductionAppContainer(
@@ -60,6 +79,13 @@ class ProductionAppContainer(
         context = appContext,
         settings = settingsRepository,
     )
+    private val notificationRefresher = UnprocessedNotificationCoordinator(
+        repository = documentRepository,
+        publisher = AndroidUnprocessedNotificationPublisher(appContext),
+    )
+    private val notificationRefreshScheduler =
+        WorkManagerNotificationRefreshScheduler(appContext)
+    private val lockState = AndroidLockState(appContext)
     private val captureProcessScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val captureRecoveryHandoff = CaptureRecoveryHandoff(
         store = recoveryStore,
@@ -77,6 +103,7 @@ class ProductionAppContainer(
         zone = ZoneId.systemDefault(),
         ioDispatcher = Dispatchers.IO,
         recoveryHandoff = captureRecoveryHandoff,
+        notificationRefresher = notificationRefresher,
     )
 
     override fun mainDependencies(): MainDependencies = MainDependencies(
@@ -86,7 +113,15 @@ class ProductionAppContainer(
             AndroidSpeechEngine(appContext, onlineFallbackAllowed)
         },
         ioDispatcher = Dispatchers.IO,
+        notificationRefresher = notificationRefresher,
     )
+
+    override fun notificationRefresher(): NotificationRefresher = notificationRefresher
+
+    override fun notificationRefreshScheduler(): NotificationRefreshScheduler =
+        notificationRefreshScheduler
+
+    override fun lockState(): LockState = lockState
 }
 
 private class SettingsBackedDocumentRepository(
@@ -117,8 +152,8 @@ private class SettingsBackedDocumentRepository(
         ?.setProcessed(source, fileName, expectedRaw, processed)
         ?: UpdateResult.Failure(RepositoryError.PermissionLost)
 
-    override suspend fun uncheckedCount(): Int =
-        currentRepository()?.uncheckedCount() ?: 0
+    override suspend fun uncheckedCount(): Int = currentRepository()?.uncheckedCount()
+        ?: throw DocumentStoreException(RepositoryError.PermissionLost)
 
     private suspend fun currentRepository(): DocumentRepository? {
         val treeUri = settings.settings.first().treeUri ?: return null

@@ -7,6 +7,9 @@ import com.sidenote.app.data.documents.DocumentRepository
 import com.sidenote.app.data.documents.DocumentStoreException
 import com.sidenote.app.data.documents.RepositoryError
 import com.sidenote.app.data.documents.UpdateResult
+import com.sidenote.app.notification.NotificationRefreshResult
+import com.sidenote.app.notification.NotificationRefresher
+import com.sidenote.app.notification.UnavailableNotificationRefresher
 import java.time.LocalDate
 import java.time.LocalTime
 import kotlinx.coroutines.CancellationException
@@ -23,6 +26,8 @@ import kotlinx.coroutines.withContext
 class ReviewViewModel(
     private val repository: DocumentRepository,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    private val notificationRefresher: NotificationRefresher =
+        UnavailableNotificationRefresher,
 ) : ViewModel() {
     private val mutableState = MutableStateFlow(ReviewState())
     val state: StateFlow<ReviewState> = mutableState.asStateFlow()
@@ -32,15 +37,34 @@ class ReviewViewModel(
     private var processedActionsActive = false
     private var documentSourceInitialized = false
     private var documentSource: DocumentSource? = null
+    private var initialRefreshActive = true
+    private var selectMostRecentUnprocessedOnNextLoad = false
 
     init {
-        refresh()
+        launchRefresh(initial = true)
     }
 
     fun refresh() {
+        launchRefresh(initial = false)
+    }
+
+    fun openMostRecentUnprocessed() {
+        selectMostRecentUnprocessedOnNextLoad = true
+        mutableState.value = mutableState.value.copy(
+            tab = ReviewTab.Dates,
+            selectedProjectKey = null,
+        )
+        if (!initialRefreshActive) refresh()
+    }
+
+    private fun launchRefresh(initial: Boolean) {
         viewModelScope.launch {
-            repositoryMutex.withLock {
-                loadDays(messageAfterLoad = null)
+            try {
+                repositoryMutex.withLock {
+                    loadDays(messageAfterLoad = null)
+                }
+            } finally {
+                if (initial) initialRefreshActive = false
             }
         }
     }
@@ -130,11 +154,13 @@ class ReviewViewModel(
     class Factory(
         private val repository: DocumentRepository,
         private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+        private val notificationRefresher: NotificationRefresher =
+            UnavailableNotificationRefresher,
     ) : ViewModelProvider.Factory {
         override fun <T : ViewModel> create(modelClass: Class<T>): T {
             require(modelClass.isAssignableFrom(ReviewViewModel::class.java))
             @Suppress("UNCHECKED_CAST")
-            return ReviewViewModel(repository, ioDispatcher) as T
+            return ReviewViewModel(repository, ioDispatcher, notificationRefresher) as T
         }
     }
 
@@ -189,7 +215,23 @@ class ReviewViewModel(
         }
         return when (result) {
             UpdateResult.Success -> {
-                loadDays(messageAfterLoad = null)
+                val notificationResult = try {
+                    withContext(ioDispatcher) { notificationRefresher.refresh() }
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (_: Exception) {
+                    null
+                }
+                val loaded = loadDays(messageAfterLoad = null)
+                if (
+                    loaded &&
+                    notificationResult == NotificationRefreshResult.FolderPermissionLost
+                ) {
+                    mutableState.value = mutableState.value.copy(
+                        message = ReviewMessage.FolderAccessLost,
+                    )
+                }
+                loaded
             }
             UpdateResult.Conflict -> {
                 loadDays(messageAfterLoad = ReviewMessage.FileChanged)
@@ -248,10 +290,17 @@ class ReviewViewModel(
             }
             val current = mutableState.value
             val availableDates = days.map(ReviewDay::date).toSet()
-            val selectedDate = current.selectedDate
-                ?.takeIf(availableDates::contains)
-                ?: days.lastOrNull { day -> day.entries.any { entry -> !entry.entry.processed } }?.date
-                ?: days.lastOrNull()?.date
+            val mostRecentUnprocessed = days
+                .lastOrNull { day -> day.entries.any { entry -> !entry.entry.processed } }
+                ?.date
+            val selectedDate = if (selectMostRecentUnprocessedOnNextLoad) {
+                mostRecentUnprocessed ?: days.lastOrNull()?.date
+            } else {
+                current.selectedDate
+                    ?.takeIf(availableDates::contains)
+                    ?: mostRecentUnprocessed
+                    ?: days.lastOrNull()?.date
+            }
             val selectedProjectKey = current.selectedProjectKey
                 ?.takeIf { key -> projects.any { project -> project.key == key } }
             val availableEntries = days.flatMap(ReviewDay::entries).map(ReviewEntry::id).toSet()
@@ -263,6 +312,7 @@ class ReviewViewModel(
                 expanded = current.expanded.intersect(availableEntries),
                 message = messageAfterLoad,
             )
+            selectMostRecentUnprocessedOnNextLoad = false
             return true
         } catch (error: CancellationException) {
             throw error

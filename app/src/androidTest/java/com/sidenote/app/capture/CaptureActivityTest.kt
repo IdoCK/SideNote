@@ -153,7 +153,7 @@ class CaptureActivityTest {
     @Test
     fun startStopStartBeforeReadinessKeepsOnlyLatestSpeechStartupWaiter() {
         container.enableVoice()
-        container.markSetupIncomplete()
+        container.markFolderUnavailable()
         val suspendedLoad = container.recovery.suspendNextLoad()
         launchCapture()
 
@@ -180,7 +180,7 @@ class CaptureActivityTest {
     @Test
     fun stoppedBeforeReadinessNeverStartsSpeech() {
         container.enableVoice()
-        container.markSetupIncomplete()
+        container.markFolderUnavailable()
         val suspendedLoad = container.recovery.suspendNextLoad()
         launchCapture()
 
@@ -316,8 +316,8 @@ class CaptureActivityTest {
     }
 
     @Test
-    fun setupBackgroundFlushesRecoveryWithoutCompleting() {
-        container.markSetupIncomplete()
+    fun missingFolderBackgroundFlushesRecoveryWithoutCompleting() {
+        container.markFolderUnavailable()
         launchCapture()
 
         scenario?.moveToState(Lifecycle.State.CREATED)
@@ -507,8 +507,8 @@ private class FakeCaptureAppContainer : AppContainer {
         recovery.draft = recovery.draft.copy(voiceEnabled = true)
     }
 
-    fun markSetupIncomplete() {
-        settings.markSetupIncomplete()
+    fun markFolderUnavailable() {
+        settings.markFolderUnavailable()
     }
 
     fun close() {
@@ -557,10 +557,10 @@ private class FakeSettingsRepository : SettingsRepository {
         reads.incrementAndGet()
     }
 
-    fun markSetupIncomplete() {
+    fun markFolderUnavailable() {
         mutableSettings.value = mutableSettings.value.copy(
             treeUri = null,
-            onboardingComplete = false,
+            onboardingComplete = true,
         )
     }
 

@@ -14,6 +14,10 @@ import com.sidenote.app.data.recovery.RecoveryDraft
 import com.sidenote.app.data.recovery.RecoveryDraftWriter
 import com.sidenote.app.data.recovery.RecoveryLoadResult
 import com.sidenote.app.data.settings.SettingsRepository
+import com.sidenote.app.data.settings.AppSettings
+import com.sidenote.app.notification.NotificationRefreshResult
+import com.sidenote.app.notification.NotificationRefresher
+import com.sidenote.app.notification.UnavailableNotificationRefresher
 import java.time.Clock
 import java.time.Instant
 import java.time.ZoneId
@@ -46,6 +50,7 @@ data class CaptureDependencies(
     val zone: ZoneId,
     val ioDispatcher: CoroutineDispatcher,
     val recoveryHandoff: CaptureRecoveryHandoff,
+    val notificationRefresher: NotificationRefresher = UnavailableNotificationRefresher,
 )
 
 class CaptureViewModel(
@@ -63,6 +68,10 @@ class CaptureViewModel(
     private val recoverySession = dependencies.recoveryHandoff.openSession()
     private val dispatchedRepository = DispatcherDocumentRepository(
         delegate = dependencies.repository,
+        dispatcher = dependencies.ioDispatcher,
+    )
+    private val dispatchedNotificationRefresher = DispatcherNotificationRefresher(
+        delegate = dependencies.notificationRefresher,
         dispatcher = dependencies.ioDispatcher,
     )
     private val externalSetupGate = ExternalSetupLaunchGate(
@@ -94,12 +103,12 @@ class CaptureViewModel(
     }
 
     @Suppress("UNUSED_PARAMETER")
-    fun start(intent: Intent) {
+    fun start(intent: Intent, preloadedSettings: AppSettings? = null) {
         if (!started.compareAndSet(false, true)) return
 
         viewModelScope.launch {
             try {
-                val settings = withContext(dependencies.ioDispatcher) {
+                val settings = preloadedSettings ?: withContext(dependencies.ioDispatcher) {
                     dependencies.settings.settings.first()
                 }
                 val recovered = when (val result = recoverySession.load()) {
@@ -124,6 +133,7 @@ class CaptureViewModel(
                     speech = currentSpeech,
                     haptic = host,
                     closer = host,
+                    notificationRefresher = dispatchedNotificationRefresher,
                 )
 
                 currentCoordinator.start(
@@ -459,5 +469,14 @@ private class DispatcherDocumentRepository(
 
     override suspend fun uncheckedCount(): Int = withContext(dispatcher) {
         delegate.uncheckedCount()
+    }
+}
+
+private class DispatcherNotificationRefresher(
+    private val delegate: NotificationRefresher,
+    private val dispatcher: CoroutineDispatcher,
+) : NotificationRefresher {
+    override suspend fun refresh(): NotificationRefreshResult = withContext(dispatcher) {
+        delegate.refresh()
     }
 }

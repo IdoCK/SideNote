@@ -7,9 +7,12 @@ import com.sidenote.app.data.documents.DocumentRepository
 import com.sidenote.app.data.markdown.ProjectSyntax
 import com.sidenote.app.data.recovery.RecoveryDraft
 import com.sidenote.app.data.recovery.RecoveryDraftStore
+import com.sidenote.app.notification.NotificationRefresher
+import com.sidenote.app.notification.UnavailableNotificationRefresher
 import java.time.Clock
 import java.time.ZoneId
 import java.util.Locale
+import kotlinx.coroutines.CancellationException
 import kotlin.math.max
 import kotlin.math.min
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -27,6 +30,8 @@ class CaptureCoordinator(
     private val speech: SpeechControl,
     private val haptic: HapticConfirmation,
     private val closer: CaptureCloser,
+    private val notificationRefresher: NotificationRefresher =
+        UnavailableNotificationRefresher,
 ) {
     private val mutableState = MutableStateFlow(CaptureState())
     val state: StateFlow<CaptureState> = mutableState.asStateFlow()
@@ -186,6 +191,13 @@ class CaptureCoordinator(
 
             when (repository.append(preparation.text, clock.instant(), zone)) {
                 AppendResult.Success -> {
+                    try {
+                        notificationRefresher.refresh()
+                    } catch (error: CancellationException) {
+                        throw error
+                    } catch (_: Exception) {
+                        // The note is already committed; notification failure is non-fatal.
+                    }
                     val exactSnapshot = synchronized(transitionLock) {
                         val current = mutableState.value
                         if (
