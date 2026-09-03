@@ -18,6 +18,11 @@ import kotlinx.coroutines.sync.withLock
 
 fun interface NotificationRefresher {
     suspend fun refresh(): NotificationRefreshResult
+
+    // Recovery providers must evaluate this guard inside their read transaction.
+    // Providers without that guarantee fail closed instead of doing an unguarded scan.
+    suspend fun refreshIfAllowed(canRead: () -> Boolean): NotificationRefreshResult =
+        NotificationRefreshResult.Unavailable
 }
 
 sealed interface NotificationRefreshResult {
@@ -60,8 +65,12 @@ class UnprocessedNotificationCoordinator(
 ) : NotificationRefresher {
     private val refreshMutex = Mutex()
 
-    override suspend fun refresh(): NotificationRefreshResult = refreshMutex.withLock {
-        refreshSerialized()
+    override suspend fun refresh(): NotificationRefreshResult = refreshIfAllowed { true }
+
+    override suspend fun refreshIfAllowed(
+        canRead: () -> Boolean,
+    ): NotificationRefreshResult = refreshMutex.withLock {
+        if (canRead()) refreshSerialized() else NotificationRefreshResult.Unavailable
     }
 
     private suspend fun refreshSerialized(): NotificationRefreshResult {

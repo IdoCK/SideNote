@@ -32,6 +32,9 @@ import com.sidenote.app.data.recovery.RecoveryDraftStore
 import com.sidenote.app.data.recovery.RecoveryLoadResult
 import com.sidenote.app.data.settings.AppSettings
 import com.sidenote.app.data.settings.SettingsRepository
+import com.sidenote.app.notification.NotificationRefresher
+import com.sidenote.app.notification.NotificationRefreshResult
+import com.sidenote.app.notification.UnavailableNotificationRefresher
 import java.time.Clock
 import java.time.Instant
 import java.time.ZoneId
@@ -109,6 +112,37 @@ class CaptureActivityTest {
     }
 
     @Test
+    fun committedCaptureWaitsForNotificationRefreshBeforeFinishingItsRealHost() {
+        val suspendedRefresh = SuspendedTestOperation()
+        container.notificationRefresher = NotificationRefresher {
+            suspendedRefresh.started.complete(Unit)
+            try {
+                suspendedRefresh.release.await()
+                suspendedRefresh.completed.complete(Unit)
+                NotificationRefreshResult.Removed
+            } catch (error: CancellationException) {
+                suspendedRefresh.cancelled.complete(Unit)
+                throw error
+            }
+        }
+        launchCapture()
+        lateinit var activity: CaptureActivity
+        scenario?.onActivity { activity = it }
+
+        assertThat(container.completionSignals.simulate(Intent.ACTION_SCREEN_OFF)).isTrue()
+        compose.waitUntil(timeoutMillis = 5_000) { suspendedRefresh.started.isCompleted }
+
+        assertThat(container.events).contains("clear")
+        assertThat(activity.isFinishing).isFalse()
+        assertThat(suspendedRefresh.cancelled.isCompleted).isFalse()
+        suspendedRefresh.release.complete(Unit)
+        waitUntil(timeoutMillis = 5_000) { activity.isDestroyed }
+        assertThat(suspendedRefresh.completed.isCompleted).isTrue()
+        assertThat(suspendedRefresh.cancelled.isCompleted).isFalse()
+        assertThat(container.repository.appends).containsExactly("captured thought")
+    }
+
+    @Test
     fun preflightCompletionSignalsCoalesceAndSaveOnceAfterConfiguredInitialization() {
         val suspendedRead = container.suspendNextSettingsRead()
         scenario = ActivityScenario.launch(
@@ -129,6 +163,62 @@ class CaptureActivityTest {
         compose.waitForIdle()
         assertThat(container.repository.appends).containsExactly("captured thought")
         assertThat(container.events.count { event -> event == "append" }).isEqualTo(1)
+        assertRecoveryFlushAppendAndClearOrder()
+    }
+
+    @Test
+    fun preflightRepeatedLaunchSurvivesRecreationAndCompletesExactlyOnce() {
+        val suspendedRead = container.suspendNextSettingsRead()
+        val suspendedAppend = container.repository.suspendNextAppend()
+        launchCapture()
+        compose.waitUntil(timeoutMillis = 5_000) { suspendedRead.started.isCompleted }
+        targetContext.startActivity(
+            Intent(targetContext, CaptureActivity::class.java)
+                .putExtra("preflight_repeat_delivered", true)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+        )
+        waitUntil(timeoutMillis = 5_000) {
+            var delivered = false
+            scenario?.onActivity { activity ->
+                delivered = activity.intent.getBooleanExtra("preflight_repeat_delivered", false)
+            }
+            delivered
+        }
+
+        scenario?.recreate()
+
+        compose.waitUntil(timeoutMillis = 5_000) { suspendedAppend.started.isCompleted }
+        suspendedAppend.release.complete(Unit)
+        assertThat(suspendedRead.cancelled.isCompleted).isTrue()
+        assertThat(container.settingsReads.get()).isEqualTo(2)
+        assertThat(container.repository.appends).containsExactly("captured thought")
+        assertRecoveryFlushAppendAndClearOrder()
+    }
+
+    @Test
+    fun preflightScreenOffAloneCompletesAfterInitialization() {
+        val suspendedRead = container.suspendNextSettingsRead()
+        launchCapture()
+        compose.waitUntil(timeoutMillis = 5_000) { suspendedRead.started.isCompleted }
+
+        assertThat(container.completionSignals.simulate(Intent.ACTION_SCREEN_OFF)).isTrue()
+        compose.waitForIdle()
+        suspendedRead.release.complete(Unit)
+
+        compose.waitUntil(timeoutMillis = 5_000) { container.repository.appends.size == 1 }
+        assertRecoveryFlushAppendAndClearOrder()
+    }
+
+    @Test
+    fun preflightBackgroundAloneCompletesAfterInitialization() {
+        val suspendedRead = container.suspendNextSettingsRead()
+        launchCapture()
+        compose.waitUntil(timeoutMillis = 5_000) { suspendedRead.started.isCompleted }
+
+        scenario?.moveToState(Lifecycle.State.CREATED)
+        suspendedRead.release.complete(Unit)
+
+        compose.waitUntil(timeoutMillis = 5_000) { container.repository.appends.size == 1 }
         assertRecoveryFlushAppendAndClearOrder()
     }
 
@@ -550,6 +640,7 @@ private class FakeCaptureAppContainer : AppContainer {
     val settingsReads: AtomicInteger get() = settings.reads
     private val processScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val recoveryHandoff = CaptureRecoveryHandoff(recovery, processScope)
+    var notificationRefresher: NotificationRefresher = UnavailableNotificationRefresher
 
     fun enableVoice() {
         recovery.draft = recovery.draft.copy(voiceEnabled = true)
@@ -584,6 +675,7 @@ private class FakeCaptureAppContainer : AppContainer {
         zone = ZoneId.of("America/New_York"),
         ioDispatcher = Dispatchers.IO,
         recoveryHandoff = recoveryHandoff,
+        notificationRefresher = notificationRefresher,
     )
 }
 

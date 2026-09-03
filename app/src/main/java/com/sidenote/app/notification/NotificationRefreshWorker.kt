@@ -51,10 +51,9 @@ class KeyguardSafeNotificationRecovery(
     private val lockState: LockState,
     private val delegate: NotificationRefresher,
 ) : NotificationRefresher {
-    override suspend fun refresh(): NotificationRefreshResult {
+    override suspend fun refresh(): NotificationRefreshResult = delegate.refreshIfAllowed {
         lockState.refresh()
-        if (lockState.locked.value) return NotificationRefreshResult.Unavailable
-        return delegate.refresh()
+        !lockState.locked.value
     }
 }
 

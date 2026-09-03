@@ -20,8 +20,10 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
 import com.sidenote.app.data.documents.SafTreePermission
 import com.sidenote.app.data.documents.TreePermissionOutcome
 import com.sidenote.app.navigation.PermissionState
@@ -32,6 +34,7 @@ import com.sidenote.app.privacy.UnlockGate
 import com.sidenote.app.review.ReviewViewModel
 import com.sidenote.app.ui.theme.SideNoteTheme
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
@@ -81,6 +84,13 @@ class MainActivity : ComponentActivity() {
             savedInstanceState?.getBoolean(STATE_PENDING_UNPROCESSED, false) == true
         consumeNotificationDestination(intent)
         lockState.refresh()
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.RESUMED) {
+                lockState.locked.collect { locked ->
+                    if (!locked) (application as SideNoteApplication).scheduleNotificationRecovery()
+                }
+            }
+        }
         if (!lockState.locked.value) initializeProtectedContent()
 
         setContent {
@@ -176,7 +186,6 @@ class MainActivity : ComponentActivity() {
             routePendingDestination()
             return
         }
-        (application as SideNoteApplication).scheduleNotificationRecovery()
         val dependencies = container.mainDependencies()
         if (dependencies == null) {
             setupUnavailable.value = true

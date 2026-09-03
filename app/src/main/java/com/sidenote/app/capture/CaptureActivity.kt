@@ -30,6 +30,7 @@ import com.sidenote.app.privacy.UnlockGate
 import com.sidenote.app.ui.theme.SideNoteTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -59,6 +60,9 @@ class CaptureActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        pendingCompletionSignal = savedInstanceState?.getString(STATE_PENDING_COMPLETION)?.let {
+            name -> CompletionSignal.entries.firstOrNull { signal -> signal.name == name }
+        }
         setShowWhenLocked(true)
         setTurnScreenOn(true)
         enableEdgeToEdge(
@@ -69,6 +73,13 @@ class CaptureActivity : ComponentActivity() {
         dependencies = container.captureDependencies()
         lockState = container.lockState()
         lockState.refresh()
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.RESUMED) {
+                lockState.locked.collect { locked ->
+                    if (!locked) (application as SideNoteApplication).scheduleNotificationRecovery()
+                }
+            }
+        }
 
         setContent {
             SideNoteTheme {
@@ -130,6 +141,7 @@ class CaptureActivity : ComponentActivity() {
 
     override fun onSaveInstanceState(outState: Bundle) {
         initialSettings?.let { settings -> outState.putSettings(settings) }
+        outState.putString(STATE_PENDING_COMPLETION, pendingCompletionSignal?.name)
         super.onSaveInstanceState(outState)
     }
 
@@ -260,6 +272,7 @@ class CaptureActivity : ComponentActivity() {
     }
 
     companion object {
+        private const val STATE_PENDING_COMPLETION = "capture_pending_completion"
         private const val STATE_HAS_SETTINGS = "capture_has_settings"
         private const val STATE_TREE_URI = "capture_tree_uri"
         private const val STATE_VOICE_ON_AT_LAUNCH = "capture_voice_on_at_launch"

@@ -2,6 +2,7 @@ package com.sidenote.app.notification
 
 import android.app.Activity
 import android.app.KeyguardManager
+import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -10,8 +11,11 @@ import android.os.SystemClock
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.v2.createEmptyComposeRule
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.text.TextRange
+import androidx.lifecycle.Lifecycle
 import androidx.test.core.app.ActivityScenario
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -169,6 +173,7 @@ class ReviewUnlockRoutingTest {
         ).also(::install)
         mainScenario = ActivityScenario.launch(Intent(targetContext, MainActivity::class.java))
         compose.onNodeWithText("private reused frame").assertIsDisplayed()
+        val initialRecoveryEnqueues = fake.notificationScheduler.enqueueCalls.get()
 
         fake.lockState.relockWithoutPublishing()
         targetContext.startActivity(
@@ -184,6 +189,66 @@ class ReviewUnlockRoutingTest {
         compose.onNodeWithText("Unlock SideNote").assertIsDisplayed()
         compose.onNodeWithText("private reused frame").assertDoesNotExist()
         assertThat(fake.lockState.dismissRequests.get()).isEqualTo(1)
+
+        fake.lockState.unlock()
+        compose.onNodeWithText("private reused frame").assertIsDisplayed()
+        compose.waitUntil(timeoutMillis = 5_000) {
+            fake.notificationScheduler.enqueueCalls.get() == initialRecoveryEnqueues + 1
+        }
+        assertThat(fake.mainDependenciesCalls.get()).isEqualTo(1)
+    }
+
+    @Test
+    fun warmCaptureReconcilesAfterTheProcessWasFirstUsedWhileLocked() {
+        val fake = UnlockRoutingContainer(
+            initiallyLocked = true,
+            settings = configuredSettings(),
+            days = emptyList(),
+        ).also(::install)
+        val intent = Intent(targetContext, CaptureActivity::class.java)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        captureScenario = ActivityScenario.launch(intent)
+        compose.waitUntil(timeoutMillis = 5_000) { fake.recovery.loads.get() == 1 }
+        assertThat(fake.notificationScheduler.enqueueCalls.get()).isEqualTo(0)
+        captureScenario?.close()
+
+        fake.lockState.unlock()
+        captureScenario = ActivityScenario.launch(intent)
+
+        compose.waitUntil(timeoutMillis = 5_000) {
+            fake.notificationScheduler.enqueueCalls.get() == 1
+        }
+        assertThat(fake.mainDependenciesCalls.get()).isEqualTo(0)
+    }
+
+    @Test
+    fun externalNotificationPermissionRestoreReconcilesWhenExistingMainResumes() {
+        val fake = UnlockRoutingContainer(
+            initiallyLocked = false,
+            settings = configuredSettings(),
+            days = emptyList(),
+        ).also(::install)
+        val packageName = targetContext.packageName
+        val manager = targetContext.getSystemService(NotificationManager::class.java)
+        // connectedDebugAndroidTest installs a fresh APK and removes it after the run.
+        // Revoking our own permission here would kill the instrumentation process.
+        assertThat(manager.areNotificationsEnabled()).isFalse()
+        mainScenario = ActivityScenario.launch(Intent(targetContext, MainActivity::class.java))
+        compose.waitUntil(timeoutMillis = 5_000) { fake.repository.daysCalls.get() == 1 }
+        compose.onNodeWithContentDescription("Settings").performClick()
+        compose.onNodeWithText("Notifications: Not allowed").performScrollTo().assertIsDisplayed()
+        val initialRecoveryEnqueues = fake.notificationScheduler.enqueueCalls.get()
+        mainScenario?.moveToState(Lifecycle.State.CREATED)
+
+        executeShellCommand("pm grant $packageName android.permission.POST_NOTIFICATIONS")
+        waitUntil(timeoutMillis = 5_000) { manager.areNotificationsEnabled() }
+        mainScenario?.moveToState(Lifecycle.State.RESUMED)
+
+        compose.onNodeWithText("Notifications: Allowed").performScrollTo().assertIsDisplayed()
+        compose.waitUntil(timeoutMillis = 5_000) {
+            fake.notificationScheduler.enqueueCalls.get() == initialRecoveryEnqueues + 1
+        }
+        assertThat(fake.mainDependenciesCalls.get()).isEqualTo(1)
     }
 
     @Test

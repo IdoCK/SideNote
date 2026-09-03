@@ -213,7 +213,6 @@ class CaptureCoordinator(
                         recovery.clear()
                     }
                     haptic.confirm()
-                    closer.close()
                     try {
                         notificationRefresher.refresh()
                     } catch (error: CancellationException) {
@@ -221,6 +220,7 @@ class CaptureCoordinator(
                     } catch (_: Exception) {
                         // The note is already committed; notification failure is non-fatal.
                     }
+                    closer.close()
                 }
 
                 AppendResult.Conflict,

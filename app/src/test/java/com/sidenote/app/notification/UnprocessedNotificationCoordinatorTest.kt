@@ -1,5 +1,6 @@
 package com.sidenote.app.notification
 
+import android.app.Activity
 import com.google.common.truth.Truth.assertThat
 import com.sidenote.app.data.documents.AppendResult
 import com.sidenote.app.data.documents.DocumentRepository
@@ -8,6 +9,7 @@ import com.sidenote.app.data.documents.RepositoryError
 import com.sidenote.app.data.documents.UpdateResult
 import com.sidenote.app.data.markdown.EntrySource
 import com.sidenote.app.data.markdown.ParsedDailyFile
+import com.sidenote.app.privacy.LockState
 import java.time.Instant
 import java.time.ZoneId
 import java.util.concurrent.CopyOnWriteArrayList
@@ -15,10 +17,12 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.runTest
 import org.junit.Test
 
@@ -135,6 +139,44 @@ class UnprocessedNotificationCoordinatorTest {
             "publish:1 unprocessed notes",
             "cancel:1001",
         ).inOrder()
+    }
+
+    @Test
+    fun queuedUnlockedRecoveryRechecksKeyguardAfterAcquiringTheScanTransaction() = runTest {
+        val scanStarted = CompletableDeferred<Unit>()
+        val releaseScan = CompletableDeferred<Unit>()
+        var countCalls = 0
+        var systemLocked = false
+        val testLockState = object : LockState {
+            override val locked = MutableStateFlow(false)
+            override fun refresh() { locked.value = systemLocked }
+            override fun requestDismissKeyguard(activity: Activity) = Unit
+        }
+        val suspendedRepository = object : DocumentRepository by repository {
+            override suspend fun uncheckedCount(): Int {
+                countCalls += 1
+                if (countCalls == 1) {
+                    scanStarted.complete(Unit)
+                    releaseScan.await()
+                }
+                return 1
+            }
+        }
+        val sharedCoordinator = UnprocessedNotificationCoordinator(suspendedRepository, publisher)
+        val recovery = KeyguardSafeNotificationRecovery(testLockState, sharedCoordinator)
+        val mutationRefresh = async(start = CoroutineStart.UNDISPATCHED) {
+            sharedCoordinator.refresh()
+        }
+        scanStarted.await()
+        val queuedRecovery = async(start = CoroutineStart.UNDISPATCHED) { recovery.refresh() }
+
+        systemLocked = true
+        releaseScan.complete(Unit)
+
+        assertThat(mutationRefresh.await()).isEqualTo(NotificationRefreshResult.Posted(1))
+        assertThat(queuedRecovery.await()).isEqualTo(NotificationRefreshResult.Unavailable)
+        assertThat(countCalls).isEqualTo(1)
+        assertThat(publisher.notifications).hasSize(1)
     }
 }
 

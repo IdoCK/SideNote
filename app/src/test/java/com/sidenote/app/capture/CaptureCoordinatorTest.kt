@@ -356,13 +356,13 @@ class CaptureCoordinatorTest {
     }
 
     @Test
-    fun confirmedAppendCompletesRecoveryAndUiBeforeRefreshingNotification() = runTest {
+    fun confirmedAppendClearsRecoveryThenRefreshesBeforeClosingItsOwner() = runTest {
         repository.beforeResult = { assertThat(notificationRefresher.refreshCalls).isEqualTo(0) }
         notificationRefresher.onRefresh = {
             assertThat(repository.appends).hasSize(1)
             assertThat(recovery.clearCalls).isEqualTo(1)
             assertThat(haptic.confirmCalls).isEqualTo(1)
-            assertThat(closer.closeCalls).isEqualTo(1)
+            assertThat(closer.closeCalls).isEqualTo(0)
         }
         coordinator.start(false, RecoveryDraft("refresh me", TextRange(10), false))
 
@@ -401,7 +401,7 @@ class CaptureCoordinatorTest {
         assertThat(coordinator.state.value.status).isEqualTo(CaptureStatus.Saved)
         assertThat(recovery.clearCalls).isEqualTo(1)
         assertThat(haptic.confirmCalls).isEqualTo(1)
-        assertThat(closer.closeCalls).isEqualTo(1)
+        assertThat(closer.closeCalls).isEqualTo(0)
 
         coordinator.complete(CompletionSignal.RepeatedLaunch)
         assertThat(repository.appends).hasSize(1)

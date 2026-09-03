@@ -92,6 +92,16 @@ class NotificationWorkSchedulingTest {
         assertThat(gated.refresh()).isEqualTo(NotificationRefreshResult.Removed)
         assertThat(refresher.refreshCalls).isEqualTo(1)
     }
+
+    @Test
+    fun recoveryRefusesProvidersWithoutAGuardedReadTransaction() = runTest {
+        val gated = KeyguardSafeNotificationRecovery(
+            MutableTestLockState(initiallyLocked = false),
+            NotificationRefresher { error("Recovery must not invoke an unguarded provider") },
+        )
+
+        assertThat(gated.refresh()).isEqualTo(NotificationRefreshResult.Unavailable)
+    }
 }
 
 private data class EnqueueCall(
@@ -134,6 +144,9 @@ private class MutableTestLockState(initiallyLocked: Boolean) : LockState {
 
 private class RecordingNotificationRefresher : NotificationRefresher {
     var refreshCalls = 0
+
+    override suspend fun refreshIfAllowed(canRead: () -> Boolean): NotificationRefreshResult =
+        if (canRead()) refresh() else NotificationRefreshResult.Unavailable
 
     override suspend fun refresh(): NotificationRefreshResult {
         refreshCalls += 1
