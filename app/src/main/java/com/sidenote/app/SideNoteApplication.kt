@@ -10,6 +10,18 @@ class SideNoteApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         container = ProductionAppContainer(this)
+        scheduleNotificationRecovery()
+    }
+
+    fun scheduleNotificationRecovery(): Boolean {
+        if (!::container.isInitialized) return false
+        val lockState = container.lockState()
+        lockState.refresh()
+        if (lockState.locked.value) return false
+        return runCatching {
+            container.notificationRefreshScheduler().enqueue()
+            true
+        }.getOrDefault(false)
     }
 
     @VisibleForTesting

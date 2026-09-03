@@ -84,6 +84,7 @@ class SideNoteMainViewModel(
             runSettingWrite(
                 write = { dependencies.settings.setTreeUri(uri) },
                 onSuccess = {
+                    runCatching { dependencies.notificationRefreshScheduler.enqueue() }
                     mutableState.value = mutableState.value.copy(
                         step = OnboardingStep.Voice,
                         message = null,

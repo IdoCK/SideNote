@@ -45,6 +45,7 @@ class CaptureActivity : ComponentActivity() {
     private var dismissRequested = false
     private var routedToOnboarding = false
     private var completionJob: Job? = null
+    private var pendingCompletionSignal: CompletionSignal? = null
     private var initialSettings: AppSettings? = null
 
     private val externalSetupLauncher = registerForActivityResult(
@@ -91,8 +92,20 @@ class CaptureActivity : ComponentActivity() {
                         )
                     }
                 } else {
-                    UnlockGate()
+                    UnlockGate(
+                        onRetry = if (onboardingComplete.value == false) {
+                            ::retryDismissal
+                        } else {
+                            null
+                        },
+                    )
                 }
+            }
+        }
+
+        completionJob = lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                dependencies.completionSignals.collect(::onCompletionSignal)
             }
         }
 
@@ -112,7 +125,7 @@ class CaptureActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        viewModel?.complete(CompletionSignal.RepeatedLaunch)
+        onCompletionSignal(CompletionSignal.RepeatedLaunch)
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -145,9 +158,13 @@ class CaptureActivity : ComponentActivity() {
 
     override fun onStop() {
         hostStarted = false
-        viewModel?.onCaptureStopped(
-            completeIfBackgrounded = !isChangingConfigurations && !isFinishing,
-        )
+        val completeIfBackgrounded = !isChangingConfigurations && !isFinishing
+        val current = viewModel
+        if (current == null) {
+            if (completeIfBackgrounded) onCompletionSignal(CompletionSignal.Backgrounded)
+        } else {
+            current.onCaptureStopped(completeIfBackgrounded)
+        }
         super.onStop()
     }
 
@@ -172,13 +189,10 @@ class CaptureActivity : ComponentActivity() {
         )
         viewModel = current
         current.start(intent, settings)
-        completionJob = lifecycleScope.launch {
-            repeatOnLifecycle(Lifecycle.State.STARTED) {
-                current.completionSignals.collect(current::complete)
-            }
-        }
         if (hostStarted) current.onCaptureStarted()
         captureReady.value = true
+        pendingCompletionSignal?.let(current::complete)
+        pendingCompletionSignal = null
     }
 
     private fun handleInitialSettings(settings: AppSettings) {
@@ -187,7 +201,17 @@ class CaptureActivity : ComponentActivity() {
             initializeCapture(settings)
             onboardingComplete.value = true
         } else {
+            pendingCompletionSignal = null
             onboardingComplete.value = false
+        }
+    }
+
+    private fun onCompletionSignal(signal: CompletionSignal) {
+        val current = viewModel
+        if (current != null) {
+            current.complete(signal)
+        } else if (onboardingComplete.value != false && pendingCompletionSignal == null) {
+            pendingCompletionSignal = signal
         }
     }
 
@@ -195,6 +219,12 @@ class CaptureActivity : ComponentActivity() {
         if (dismissRequested || !lockState.locked.value) return
         dismissRequested = true
         lockState.requestDismissKeyguard(this)
+    }
+
+    private fun retryDismissal() {
+        if (!lockState.locked.value) return
+        dismissRequested = false
+        requestDismissalOnce()
     }
 
     private fun routeToOnboarding() {

@@ -15,6 +15,7 @@ import com.sidenote.app.data.settings.AppSettings
 import com.sidenote.app.data.settings.SettingsRepository
 import com.sidenote.app.onboarding.OnboardingStep
 import com.sidenote.app.onboarding.SpeechPreparationState
+import com.sidenote.app.notification.NotificationRefreshScheduler
 import java.time.Instant
 import java.time.ZoneId
 import kotlinx.coroutines.CompletableDeferred
@@ -81,6 +82,30 @@ class SideNoteMainViewModelTest {
             "onboarding:true",
         ).inOrder()
     }
+
+    @Test
+    fun successfulFolderRecoverySchedulesAUniqueNotificationReconciliation() =
+        runTest(dispatcher) {
+            val settings = RecordingSettingsRepository()
+            val scheduler = RecordingNotificationRefreshScheduler()
+            val viewModel = SideNoteMainViewModel(
+                MainDependencies(
+                    settings = settings,
+                    repository = EmptyDocumentRepository,
+                    speechFactory = { RecordingSpeechEngine() },
+                    ioDispatcher = dispatcher,
+                    notificationRefreshScheduler = scheduler,
+                ),
+            )
+            advanceUntilIdle()
+
+            val uri = Uri.parse("content://notes/tree/Recovered")
+            viewModel.onFolderSelected(uri)
+            advanceUntilIdle()
+
+            assertThat(settings.value.treeUri).isEqualTo(uri)
+            assertThat(scheduler.enqueueCalls).isEqualTo(1)
+        }
 
     @Test
     fun speechPreparationChecksSupportRequestsDownloadsAndDestroysEachEngine() =
@@ -322,6 +347,14 @@ private class RecordingSpeechEngine : SpeechEngine {
 
     override fun destroy() {
         destroyCalls += 1
+    }
+}
+
+private class RecordingNotificationRefreshScheduler : NotificationRefreshScheduler {
+    var enqueueCalls = 0
+
+    override fun enqueue() {
+        enqueueCalls += 1
     }
 }
 

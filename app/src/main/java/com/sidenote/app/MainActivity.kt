@@ -63,7 +63,10 @@ class MainActivity : ComponentActivity() {
     private val permissionsLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
     ) {
-        if (::mainViewModel.isInitialized && !lockState.locked.value) refreshPermissionState()
+        if (::mainViewModel.isInitialized && !lockState.locked.value) {
+            refreshPermissionState()
+            (application as SideNoteApplication).scheduleNotificationRecovery()
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -78,22 +81,25 @@ class MainActivity : ComponentActivity() {
             savedInstanceState?.getBoolean(STATE_PENDING_UNPROCESSED, false) == true
         consumeNotificationDestination(intent)
         lockState.refresh()
-        setShowWhenLocked(lockState.locked.value)
         if (!lockState.locked.value) initializeProtectedContent()
 
         setContent {
             SideNoteTheme {
                 val locked by lockState.locked.collectAsState()
                 LaunchedEffect(locked) {
-                    if (locked) {
-                        requestDismissalOnce()
-                    } else {
+                    if (!locked) {
                         dismissRequested = false
                         setShowWhenLocked(false)
                         initializeProtectedContent()
                     }
                 }
-                if (locked || !protectedContentReady.value) {
+                if (locked) {
+                    UnlockGate(onRetry = ::retryDismissal)
+                    LaunchedEffect(Unit) {
+                        setShowWhenLocked(true)
+                        requestDismissalOnce()
+                    }
+                } else if (!protectedContentReady.value) {
                     UnlockGate()
                 } else if (setupUnavailable.value) {
                     Text("Setup")
@@ -110,10 +116,7 @@ class MainActivity : ComponentActivity() {
         consumeNotificationDestination(intent)
         if (::lockState.isInitialized) {
             lockState.refresh()
-            if (lockState.locked.value) {
-                setShowWhenLocked(true)
-                requestDismissalOnce()
-            } else {
+            if (!lockState.locked.value) {
                 routePendingDestination()
             }
         }
@@ -173,6 +176,7 @@ class MainActivity : ComponentActivity() {
             routePendingDestination()
             return
         }
+        (application as SideNoteApplication).scheduleNotificationRecovery()
         val dependencies = container.mainDependencies()
         if (dependencies == null) {
             setupUnavailable.value = true
@@ -217,12 +221,16 @@ class MainActivity : ComponentActivity() {
         lockState.requestDismissKeyguard(this)
     }
 
+    private fun retryDismissal() {
+        if (!lockState.locked.value) return
+        dismissRequested = false
+        requestDismissalOnce()
+    }
+
     private fun launchFolderPickerAfterUnlock() {
         lockState.refresh()
         if (lockState.locked.value) {
             mainViewModel.onProtectedActionBlocked()
-            setShowWhenLocked(true)
-            requestDismissalOnce()
             return
         }
         folderPicker.launch(
@@ -238,8 +246,6 @@ class MainActivity : ComponentActivity() {
         lockState.refresh()
         if (lockState.locked.value) {
             mainViewModel.onProtectedActionBlocked()
-            setShowWhenLocked(true)
-            requestDismissalOnce()
             return
         }
         permissionsLauncher.launch(

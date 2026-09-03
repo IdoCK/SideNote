@@ -1,5 +1,6 @@
 package com.sidenote.app.notification
 
+import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import androidx.work.ExistingWorkPolicy
@@ -8,6 +9,11 @@ import com.google.common.truth.Truth.assertThat
 import com.sidenote.app.AppContainer
 import com.sidenote.app.SideNoteApplication
 import com.sidenote.app.capture.CaptureDependencies
+import com.sidenote.app.privacy.LockState
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Before
 import org.junit.Test
@@ -58,6 +64,34 @@ class NotificationWorkSchedulingTest {
 
         assertThat(fake.enqueueCalls).isEqualTo(1)
     }
+
+    @Test
+    fun appRecoveryEnqueuesOnlyAfterTheKeyguardIsActuallyUnlocked() {
+        val scheduler = RecordingNotificationRefreshScheduler()
+        val lockState = MutableTestLockState(initiallyLocked = true)
+        application.installContainerForTesting(SchedulingContainer(scheduler, lockState))
+
+        assertThat(application.scheduleNotificationRecovery()).isFalse()
+        assertThat(scheduler.enqueueCalls).isEqualTo(0)
+
+        lockState.unlock()
+        assertThat(application.scheduleNotificationRecovery()).isTrue()
+        assertThat(scheduler.enqueueCalls).isEqualTo(1)
+    }
+
+    @Test
+    fun workerRecoveryGateNeverReadsProtectedNotesWhileLocked() = runTest {
+        val lockState = MutableTestLockState(initiallyLocked = true)
+        val refresher = RecordingNotificationRefresher()
+        val gated = KeyguardSafeNotificationRecovery(lockState, refresher)
+
+        assertThat(gated.refresh()).isEqualTo(NotificationRefreshResult.Unavailable)
+        assertThat(refresher.refreshCalls).isEqualTo(0)
+
+        lockState.unlock()
+        assertThat(gated.refresh()).isEqualTo(NotificationRefreshResult.Removed)
+        assertThat(refresher.refreshCalls).isEqualTo(1)
+    }
 }
 
 private data class EnqueueCall(
@@ -76,8 +110,33 @@ private class RecordingNotificationRefreshScheduler : NotificationRefreshSchedul
 
 private class SchedulingContainer(
     private val scheduler: NotificationRefreshScheduler,
+    private val testLockState: LockState? = null,
 ) : AppContainer {
     override fun captureDependencies(): CaptureDependencies = error("Capture is not used")
 
     override fun notificationRefreshScheduler(): NotificationRefreshScheduler = scheduler
+
+    override fun lockState(): LockState = testLockState ?: super.lockState()
+}
+
+private class MutableTestLockState(initiallyLocked: Boolean) : LockState {
+    private val mutableLocked = MutableStateFlow(initiallyLocked)
+    override val locked: StateFlow<Boolean> = mutableLocked.asStateFlow()
+
+    override fun refresh() = Unit
+
+    override fun requestDismissKeyguard(activity: Activity) = Unit
+
+    fun unlock() {
+        mutableLocked.value = false
+    }
+}
+
+private class RecordingNotificationRefresher : NotificationRefresher {
+    var refreshCalls = 0
+
+    override suspend fun refresh(): NotificationRefreshResult {
+        refreshCalls += 1
+        return NotificationRefreshResult.Removed
+    }
 }

@@ -13,6 +13,7 @@ import java.time.Clock
 import java.time.ZoneId
 import java.util.Locale
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
 import kotlin.math.max
 import kotlin.math.min
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -20,6 +21,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 
 class CaptureCoordinator(
     private val repository: DocumentRepository,
@@ -191,13 +193,6 @@ class CaptureCoordinator(
 
             when (repository.append(preparation.text, clock.instant(), zone)) {
                 AppendResult.Success -> {
-                    try {
-                        notificationRefresher.refresh()
-                    } catch (error: CancellationException) {
-                        throw error
-                    } catch (_: Exception) {
-                        // The note is already committed; notification failure is non-fatal.
-                    }
                     val exactSnapshot = synchronized(transitionLock) {
                         val current = mutableState.value
                         if (
@@ -214,9 +209,18 @@ class CaptureCoordinator(
                         }
                     }
                     if (!exactSnapshot) return
-                    recovery.clear()
+                    withContext(NonCancellable) {
+                        recovery.clear()
+                    }
                     haptic.confirm()
                     closer.close()
+                    try {
+                        notificationRefresher.refresh()
+                    } catch (error: CancellationException) {
+                        throw error
+                    } catch (_: Exception) {
+                        // The note is already committed; notification failure is non-fatal.
+                    }
                 }
 
                 AppendResult.Conflict,

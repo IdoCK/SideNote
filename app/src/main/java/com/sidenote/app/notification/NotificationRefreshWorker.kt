@@ -9,6 +9,7 @@ import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import androidx.work.workDataOf
 import com.sidenote.app.SideNoteApplication
+import com.sidenote.app.privacy.LockState
 import kotlinx.coroutines.CancellationException
 
 class NotificationRefreshWorker(
@@ -18,7 +19,12 @@ class NotificationRefreshWorker(
     override suspend fun doWork(): Result {
         val application = applicationContext as? SideNoteApplication ?: return Result.failure()
         return try {
-            when (application.container.notificationRefresher().refresh()) {
+            when (
+                KeyguardSafeNotificationRecovery(
+                    lockState = application.container.lockState(),
+                    delegate = application.container.notificationRefresher(),
+                ).refresh()
+            ) {
                 NotificationRefreshResult.Unavailable -> Result.retry()
                 NotificationRefreshResult.FolderPermissionLost -> Result.success(
                     workDataOf(OUTPUT_FOLDER_PERMISSION_LOST to true),
@@ -38,6 +44,17 @@ class NotificationRefreshWorker(
     companion object {
         const val UNIQUE_WORK_NAME = "refresh-unprocessed-notes"
         const val OUTPUT_FOLDER_PERMISSION_LOST = "folder_permission_lost"
+    }
+}
+
+class KeyguardSafeNotificationRecovery(
+    private val lockState: LockState,
+    private val delegate: NotificationRefresher,
+) : NotificationRefresher {
+    override suspend fun refresh(): NotificationRefreshResult {
+        lockState.refresh()
+        if (lockState.locked.value) return NotificationRefreshResult.Unavailable
+        return delegate.refresh()
     }
 }
 

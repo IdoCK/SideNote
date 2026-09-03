@@ -27,6 +27,17 @@ class AndroidLockStateTest {
     }
 
     @Test
+    fun trustedOrSwipeDismissableKeyguardStillProtectsPrivateContent() {
+        shadowManager.setIsDeviceLocked(false)
+        shadowManager.setKeyguardLocked(true)
+
+        val lockState = AndroidLockState(context)
+        lockState.refresh()
+
+        assertThat(lockState.locked.value).isTrue()
+    }
+
+    @Test
     fun realAdapterRequestsDismissalAndPublishesSuccess() {
         shadowManager.setIsDeviceLocked(true)
         shadowManager.setKeyguardLocked(true)

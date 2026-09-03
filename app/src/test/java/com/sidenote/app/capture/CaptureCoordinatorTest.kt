@@ -356,13 +356,13 @@ class CaptureCoordinatorTest {
     }
 
     @Test
-    fun confirmedAppendRefreshesNotificationExactlyOnceBeforeCompletionEffects() = runTest {
+    fun confirmedAppendCompletesRecoveryAndUiBeforeRefreshingNotification() = runTest {
         repository.beforeResult = { assertThat(notificationRefresher.refreshCalls).isEqualTo(0) }
         notificationRefresher.onRefresh = {
             assertThat(repository.appends).hasSize(1)
-            assertThat(recovery.clearCalls).isEqualTo(0)
-            assertThat(haptic.confirmCalls).isEqualTo(0)
-            assertThat(closer.closeCalls).isEqualTo(0)
+            assertThat(recovery.clearCalls).isEqualTo(1)
+            assertThat(haptic.confirmCalls).isEqualTo(1)
+            assertThat(closer.closeCalls).isEqualTo(1)
         }
         coordinator.start(false, RecoveryDraft("refresh me", TextRange(10), false))
 
@@ -385,6 +385,26 @@ class CaptureCoordinatorTest {
         assertThat(notificationRefresher.refreshCalls).isEqualTo(1)
         assertThat(recovery.clearCalls).isEqualTo(1)
         assertThat(closer.closeCalls).isEqualTo(1)
+    }
+
+    @Test
+    fun cancellationDuringNotificationRefreshCannotLeaveACommittedDraftRecoverable() = runTest {
+        val suspendedRefresh = notificationRefresher.suspendNextRefresh()
+        coordinator.start(false, RecoveryDraft("save once", TextRange(9), false))
+        val completion = launch { coordinator.complete(CompletionSignal.ScreenOff) }
+        suspendedRefresh.started.await()
+
+        completion.cancel()
+        completion.join()
+
+        assertThat(repository.appends).containsExactly(AppendCall("save once", instant, zone))
+        assertThat(coordinator.state.value.status).isEqualTo(CaptureStatus.Saved)
+        assertThat(recovery.clearCalls).isEqualTo(1)
+        assertThat(haptic.confirmCalls).isEqualTo(1)
+        assertThat(closer.closeCalls).isEqualTo(1)
+
+        coordinator.complete(CompletionSignal.RepeatedLaunch)
+        assertThat(repository.appends).hasSize(1)
     }
 
     @Test
@@ -596,11 +616,30 @@ private class RecordingNotificationRefresher : NotificationRefresher {
     var refreshCalls = 0
     var onRefresh: (() -> Unit)? = null
     var failure: RuntimeException? = null
+    private var suspendedRefresh: SuspendedRefresh? = null
+
+    fun suspendNextRefresh(): SuspendedRefresh = SuspendedRefresh(
+        started = CompletableDeferred(),
+        release = CompletableDeferred(),
+    ).also { suspendedRefresh = it }
 
     override suspend fun refresh(): NotificationRefreshResult {
         refreshCalls += 1
         onRefresh?.invoke()
+        suspendedRefresh?.let { suspension ->
+            suspension.started.complete(Unit)
+            try {
+                suspension.release.await()
+            } finally {
+                suspendedRefresh = null
+            }
+        }
         failure?.let { throw it }
         return NotificationRefreshResult.Removed
     }
 }
+
+private data class SuspendedRefresh(
+    val started: CompletableDeferred<Unit>,
+    val release: CompletableDeferred<Unit>,
+)

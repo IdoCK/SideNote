@@ -13,6 +13,8 @@ import com.sidenote.app.data.documents.DocumentRepository
 import com.sidenote.app.data.documents.DocumentStoreException
 import com.sidenote.app.data.documents.RepositoryError
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 fun interface NotificationRefresher {
     suspend fun refresh(): NotificationRefreshResult
@@ -56,7 +58,13 @@ class UnprocessedNotificationCoordinator(
     private val repository: DocumentRepository,
     private val publisher: UnprocessedNotificationPublisher,
 ) : NotificationRefresher {
-    override suspend fun refresh(): NotificationRefreshResult {
+    private val refreshMutex = Mutex()
+
+    override suspend fun refresh(): NotificationRefreshResult = refreshMutex.withLock {
+        refreshSerialized()
+    }
+
+    private suspend fun refreshSerialized(): NotificationRefreshResult {
         val count = try {
             repository.uncheckedCount()
         } catch (error: CancellationException) {

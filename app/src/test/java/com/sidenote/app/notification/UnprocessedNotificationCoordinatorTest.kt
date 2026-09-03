@@ -10,6 +10,15 @@ import com.sidenote.app.data.markdown.EntrySource
 import com.sidenote.app.data.markdown.ParsedDailyFile
 import java.time.Instant
 import java.time.ZoneId
+import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
 import org.junit.Test
 
@@ -79,6 +88,53 @@ class UnprocessedNotificationCoordinatorTest {
 
         assertThat(publisher.cancelledIds).containsExactly(1001)
         assertThat(publisher.notifications).isEmpty()
+    }
+
+    @Test
+    fun olderCountCannotPublishAfterANewerRefreshRemovesTheNotification() = runBlocking {
+        val countCall = AtomicInteger()
+        val publishStarted = CountDownLatch(1)
+        val releaseOlderPublish = CountDownLatch(1)
+        val events = CopyOnWriteArrayList<String>()
+        val interleavedRepository = object : DocumentRepository by repository {
+            override suspend fun uncheckedCount(): Int =
+                if (countCall.incrementAndGet() == 1) 1 else 0
+        }
+        val interleavedPublisher = object : UnprocessedNotificationPublisher {
+            override fun publish(
+                notification: UnprocessedNotificationSpec,
+            ): NotificationPublishOutcome {
+                publishStarted.countDown()
+                check(releaseOlderPublish.await(5, TimeUnit.SECONDS))
+                events += "publish:${notification.title}"
+                return NotificationPublishOutcome.Posted
+            }
+
+            override fun cancel(notificationId: Int) {
+                events += "cancel:$notificationId"
+            }
+        }
+        val interleavedCoordinator = UnprocessedNotificationCoordinator(
+            interleavedRepository,
+            interleavedPublisher,
+        )
+
+        coroutineScope {
+            val older = async(Dispatchers.Default) { interleavedCoordinator.refresh() }
+            check(publishStarted.await(5, TimeUnit.SECONDS))
+            val newer = async(start = CoroutineStart.UNDISPATCHED) {
+                interleavedCoordinator.refresh()
+            }
+            releaseOlderPublish.countDown()
+
+            assertThat(older.await()).isEqualTo(NotificationRefreshResult.Posted(1))
+            assertThat(newer.await()).isEqualTo(NotificationRefreshResult.Removed)
+        }
+
+        assertThat(events).containsExactly(
+            "publish:1 unprocessed notes",
+            "cancel:1001",
+        ).inOrder()
     }
 }
 

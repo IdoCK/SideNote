@@ -221,7 +221,7 @@ class ReviewScreenTest {
                 settings = settings,
                 folderLabel = "SideNote",
                 microphoneGranted = false,
-                notificationsGranted = true,
+                notificationsGranted = false,
                 onBack = {},
                 onChooseFolder = { folderCalls += 1 },
                 onVoiceOnAtLaunchChange = {},
@@ -235,7 +235,10 @@ class ReviewScreenTest {
         compose.onNodeWithText("Voice on at launch").assertIsDisplayed()
         compose.onNodeWithText("Allow online voice recognition").performClick()
         compose.onNodeWithText("Microphone: Not allowed").assertIsDisplayed()
-        compose.onNodeWithText("Notifications: Allowed").assertIsDisplayed()
+        compose.onNodeWithText("Notifications: Not allowed").assertIsDisplayed()
+        compose.onNodeWithText(
+            "The unprocessed-note reminder is unavailable. Capture and Review still work.",
+        ).assertIsDisplayed()
         compose.onNodeWithText("Review permissions").performClick()
         compose.onNodeWithText(
             "Settings → System → Gestures → Quick Tap → Open app → SideNote",

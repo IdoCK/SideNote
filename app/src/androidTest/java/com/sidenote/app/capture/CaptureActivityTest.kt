@@ -109,6 +109,54 @@ class CaptureActivityTest {
     }
 
     @Test
+    fun preflightCompletionSignalsCoalesceAndSaveOnceAfterConfiguredInitialization() {
+        val suspendedRead = container.suspendNextSettingsRead()
+        scenario = ActivityScenario.launch(
+            Intent(targetContext, CaptureActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+        )
+        compose.waitUntil(timeoutMillis = 5_000) { suspendedRead.started.isCompleted }
+
+        targetContext.startActivity(
+            Intent(targetContext, CaptureActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+        )
+        assertThat(container.completionSignals.simulate(Intent.ACTION_SCREEN_OFF)).isTrue()
+        scenario?.moveToState(Lifecycle.State.CREATED)
+        suspendedRead.release.complete(Unit)
+
+        compose.waitUntil(timeoutMillis = 5_000) { container.repository.appends.size == 1 }
+        compose.waitForIdle()
+        assertThat(container.repository.appends).containsExactly("captured thought")
+        assertThat(container.events.count { event -> event == "append" }).isEqualTo(1)
+        assertRecoveryFlushAppendAndClearOrder()
+    }
+
+    @Test
+    fun preflightCompletionSignalsAreDiscardedWhenOnboardingIsIncomplete() {
+        container.markOnboardingIncomplete()
+        val suspendedRead = container.suspendNextSettingsRead()
+        scenario = ActivityScenario.launch(
+            Intent(targetContext, CaptureActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+        )
+        compose.waitUntil(timeoutMillis = 5_000) { suspendedRead.started.isCompleted }
+
+        targetContext.startActivity(
+            Intent(targetContext, CaptureActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+        )
+        assertThat(container.completionSignals.simulate(Intent.ACTION_SCREEN_OFF)).isTrue()
+        suspendedRead.release.complete(Unit)
+
+        compose.waitUntil(timeoutMillis = 5_000) { container.settingsReads.get() == 1 }
+        compose.waitForIdle()
+        assertThat(container.repository.appends).isEmpty()
+        assertThat(container.recovery.loads.get()).isEqualTo(0)
+        assertThat(container.speechFactoryCalls.get()).isEqualTo(0)
+    }
+
+    @Test
     fun screenOffSignalWhileCaptureIsActiveCompletesExactlyOnce() {
         launchCapture()
 
@@ -511,6 +559,12 @@ private class FakeCaptureAppContainer : AppContainer {
         settings.markFolderUnavailable()
     }
 
+    fun markOnboardingIncomplete() {
+        settings.markOnboardingIncomplete()
+    }
+
+    fun suspendNextSettingsRead(): SuspendedTestOperation = settings.suspendNextRead()
+
     fun close() {
         processScope.cancel()
     }
@@ -553,8 +607,25 @@ private class FakeSettingsRepository : SettingsRepository {
         ),
     )
     val reads = AtomicInteger()
+    @Volatile private var suspendedRead: SuspendedTestOperation? = null
     override val settings: Flow<AppSettings> = mutableSettings.onStart {
         reads.incrementAndGet()
+        suspendedRead?.let { suspension ->
+            suspension.started.complete(Unit)
+            try {
+                suspension.release.await()
+                suspension.completed.complete(Unit)
+            } catch (error: CancellationException) {
+                suspension.cancelled.complete(Unit)
+                throw error
+            } finally {
+                suspendedRead = null
+            }
+        }
+    }
+
+    fun suspendNextRead(): SuspendedTestOperation = SuspendedTestOperation().also {
+        suspendedRead = it
     }
 
     fun markFolderUnavailable() {
@@ -562,6 +633,10 @@ private class FakeSettingsRepository : SettingsRepository {
             treeUri = null,
             onboardingComplete = true,
         )
+    }
+
+    fun markOnboardingIncomplete() {
+        mutableSettings.value = mutableSettings.value.copy(onboardingComplete = false)
     }
 
     override suspend fun setTreeUri(treeUri: Uri?) = Unit
@@ -577,6 +652,7 @@ private class FakeRecoveryDraftStore(
     private val events: MutableList<String>,
 ) : RecoveryDraftStore {
     val mainThreadCalls = AtomicInteger()
+    val loads = AtomicInteger()
     var draft = RecoveryDraft(
         text = "captured thought",
         selection = TextRange(16),
@@ -595,6 +671,7 @@ private class FakeRecoveryDraftStore(
 
     override suspend fun load(): RecoveryLoadResult {
         recordCallingThread()
+        loads.incrementAndGet()
         events += "load"
         suspendedLoad?.let { suspension ->
             suspension.started.complete(Unit)

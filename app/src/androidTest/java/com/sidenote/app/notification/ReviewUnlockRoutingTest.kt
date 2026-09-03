@@ -1,11 +1,16 @@
 package com.sidenote.app.notification
 
 import android.app.Activity
+import android.app.KeyguardManager
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.os.ParcelFileDescriptor
+import android.os.SystemClock
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.v2.createEmptyComposeRule
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
 import androidx.compose.ui.text.TextRange
 import androidx.test.core.app.ActivityScenario
 import androidx.test.core.app.ApplicationProvider
@@ -33,11 +38,13 @@ import com.sidenote.app.data.recovery.RecoveryLoadResult
 import com.sidenote.app.data.settings.AppSettings
 import com.sidenote.app.data.settings.SettingsRepository
 import com.sidenote.app.privacy.LockState
+import com.sidenote.app.privacy.AndroidLockState
 import java.time.Clock
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -99,6 +106,7 @@ class ReviewUnlockRoutingTest {
         assertThat(fake.mainDependenciesCalls.get()).isEqualTo(0)
         assertThat(fake.settings.reads.get()).isEqualTo(0)
         assertThat(fake.repository.daysCalls.get()).isEqualTo(0)
+        assertThat(fake.notificationScheduler.enqueueCalls.get()).isEqualTo(0)
 
         mainScenario?.recreate()
         repeat(2) {
@@ -125,6 +133,7 @@ class ReviewUnlockRoutingTest {
         compose.onNodeWithText("newer processed note").assertDoesNotExist()
         assertThat(fake.mainDependenciesCalls.get()).isEqualTo(1)
         assertThat(fake.repository.daysCalls.get()).isEqualTo(1)
+        assertThat(fake.notificationScheduler.enqueueCalls.get()).isEqualTo(1)
     }
 
     @Test
@@ -143,10 +152,57 @@ class ReviewUnlockRoutingTest {
         fake.lockState.dismissalDidNotUnlock()
 
         compose.onNodeWithText("Unlock SideNote").assertIsDisplayed()
+        compose.onNodeWithText("Try again").performClick()
+        compose.waitUntil(timeoutMillis = 5_000) { fake.lockState.dismissRequests.get() == 2 }
         compose.onNodeWithText("private note").assertDoesNotExist()
         assertThat(fake.mainDependenciesCalls.get()).isEqualTo(0)
         assertThat(fake.settings.reads.get()).isEqualTo(0)
         assertThat(fake.repository.daysCalls.get()).isEqualTo(0)
+    }
+
+    @Test
+    fun reusedMainCommitsAnOpaqueGateBeforeHandlingALockedNotificationIntent() {
+        val fake = UnlockRoutingContainer(
+            initiallyLocked = false,
+            settings = configuredSettings(),
+            days = listOf(day("2026-08-27", "- [ ] **09:00** private reused frame")),
+        ).also(::install)
+        mainScenario = ActivityScenario.launch(Intent(targetContext, MainActivity::class.java))
+        compose.onNodeWithText("private reused frame").assertIsDisplayed()
+
+        fake.lockState.relockWithoutPublishing()
+        targetContext.startActivity(
+            Intent(targetContext, MainActivity::class.java)
+                .putExtra(MainActivity.EXTRA_OPEN_MOST_RECENT_UNPROCESSED, true)
+                .addFlags(
+                    Intent.FLAG_ACTIVITY_NEW_TASK or
+                        Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                        Intent.FLAG_ACTIVITY_SINGLE_TOP,
+                ),
+        )
+
+        compose.onNodeWithText("Unlock SideNote").assertIsDisplayed()
+        compose.onNodeWithText("private reused frame").assertDoesNotExist()
+        assertThat(fake.lockState.dismissRequests.get()).isEqualTo(1)
+    }
+
+    @Test
+    fun realAdapterReportsTheActualCredentialFreeKeyguardAsLocked() {
+        val wasDisabled = shellOutput("locksettings get-disabled").trim() == "true"
+        try {
+            if (wasDisabled) executeShellCommand("locksettings set-disabled false")
+            executeShellCommand("input keyevent KEYCODE_SLEEP")
+            waitUntil(timeoutMillis = 5_000) { keyguardManager().isKeyguardLocked }
+
+            val realLockState = AndroidLockState(targetContext)
+            realLockState.refresh()
+
+            assertThat(realLockState.locked.value).isTrue()
+        } finally {
+            executeShellCommand("input keyevent KEYCODE_WAKEUP")
+            executeShellCommand("wm dismiss-keyguard")
+            if (wasDisabled) executeShellCommand("locksettings set-disabled true")
+        }
     }
 
     @Test
@@ -216,6 +272,30 @@ class ReviewUnlockRoutingTest {
         val localDate = LocalDate.parse(date)
         return MarkdownCodec().parse(localDate, "# $date\n\n$task\n")
     }
+
+    private fun keyguardManager(): KeyguardManager =
+        targetContext.getSystemService(Context.KEYGUARD_SERVICE) as KeyguardManager
+
+    private fun executeShellCommand(command: String) {
+        shellOutput(command)
+    }
+
+    private fun shellOutput(command: String): String {
+        val descriptor = InstrumentationRegistry.getInstrumentation()
+            .uiAutomation
+            .executeShellCommand(command)
+        return ParcelFileDescriptor.AutoCloseInputStream(descriptor)
+            .bufferedReader()
+            .use { reader -> reader.readText() }
+    }
+
+    private fun waitUntil(timeoutMillis: Long, condition: () -> Boolean) {
+        val deadline = SystemClock.uptimeMillis() + timeoutMillis
+        while (!condition() && SystemClock.uptimeMillis() < deadline) {
+            SystemClock.sleep(50)
+        }
+        assertThat(condition()).isTrue()
+    }
 }
 
 private class UnlockRoutingContainer(
@@ -228,11 +308,15 @@ private class UnlockRoutingContainer(
     val settings = CountingSettingsRepository(settings)
     val repository = CountingDocumentRepository(days)
     val recovery = CountingRecoveryStore(recoveryText)
+    val notificationScheduler = RecordingNotificationRefreshScheduler()
     val mainDependenciesCalls = AtomicInteger()
     private val processScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val recoveryHandoff = CaptureRecoveryHandoff(recovery, processScope)
 
     override fun lockState(): LockState = lockState
+
+    override fun notificationRefreshScheduler(): NotificationRefreshScheduler =
+        notificationScheduler
 
     override fun mainDependencies(): MainDependencies {
         mainDependenciesCalls.incrementAndGet()
@@ -264,22 +348,39 @@ private class UnlockRoutingContainer(
 }
 
 private class FakeLockState(initiallyLocked: Boolean) : LockState {
+    private val systemLocked = AtomicBoolean(initiallyLocked)
     private val mutableLocked = MutableStateFlow(initiallyLocked)
     override val locked: StateFlow<Boolean> = mutableLocked.asStateFlow()
     val dismissRequests = AtomicInteger()
 
-    override fun refresh() = Unit
+    override fun refresh() {
+        mutableLocked.value = systemLocked.get()
+    }
 
     override fun requestDismissKeyguard(activity: Activity) {
         dismissRequests.incrementAndGet()
     }
 
     fun unlock() {
+        systemLocked.set(false)
         mutableLocked.value = false
     }
 
+    fun relockWithoutPublishing() {
+        systemLocked.set(true)
+    }
+
     fun dismissalDidNotUnlock() {
+        systemLocked.set(true)
         mutableLocked.value = true
+    }
+}
+
+private class RecordingNotificationRefreshScheduler : NotificationRefreshScheduler {
+    val enqueueCalls = AtomicInteger()
+
+    override fun enqueue() {
+        enqueueCalls.incrementAndGet()
     }
 }
 

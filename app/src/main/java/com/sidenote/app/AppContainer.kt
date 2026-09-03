@@ -64,6 +64,8 @@ data class MainDependencies(
     val speechFactory: (onlineFallbackAllowed: Boolean) -> SpeechEngine,
     val ioDispatcher: kotlinx.coroutines.CoroutineDispatcher,
     val notificationRefresher: NotificationRefresher = UnavailableNotificationRefresher,
+    val notificationRefreshScheduler: NotificationRefreshScheduler =
+        NoOpNotificationRefreshScheduler,
 )
 
 class ProductionAppContainer(
@@ -114,6 +116,7 @@ class ProductionAppContainer(
         },
         ioDispatcher = Dispatchers.IO,
         notificationRefresher = notificationRefresher,
+        notificationRefreshScheduler = notificationRefreshScheduler,
     )
 
     override fun notificationRefresher(): NotificationRefresher = notificationRefresher

@@ -109,6 +109,12 @@ fun SettingsScreen(
             SettingSection("Permissions") {
                 Text("Microphone: ${permissionLabel(microphoneGranted)}")
                 Text("Notifications: ${permissionLabel(notificationsGranted)}")
+                if (!notificationsGranted) {
+                    Text(
+                        "The unprocessed-note reminder is unavailable. Capture and Review still work.",
+                        color = ReviewSubdued,
+                    )
+                }
                 Button(
                     onClick = onRequestPermissions,
                     modifier = Modifier.sizeIn(minHeight = 48.dp),
