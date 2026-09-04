@@ -4,4 +4,8 @@
     <string name="voice_input_on">Voice input on</string>
     <string name="voice_input_off">Voice input off</string>
     <string name="discard">Discard</string>
+    <string name="capture_save_failed">Could not save. Your draft is kept; restore folder access in Settings and try again.</string>
+    <string name="capture_voice_unavailable">Voice is unavailable. You can keep typing.</string>
+    <string name="capture_saved">Saved · %1$s</string>
+    <string name="capture_discarded">Discarded</string>
 </resources>

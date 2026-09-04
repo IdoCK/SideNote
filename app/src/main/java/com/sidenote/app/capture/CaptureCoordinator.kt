@@ -11,6 +11,7 @@ import com.sidenote.app.notification.NotificationRefresher
 import com.sidenote.app.notification.UnavailableNotificationRefresher
 import java.time.Clock
 import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import java.util.Locale
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
@@ -191,7 +192,8 @@ class CaptureCoordinator(
                 return
             }
 
-            when (repository.append(preparation.text, clock.instant(), zone)) {
+            val committedAt = clock.instant()
+            when (repository.append(preparation.text, committedAt, zone)) {
                 AppendResult.Success -> {
                     val exactSnapshot = synchronized(transitionLock) {
                         val current = mutableState.value
@@ -204,7 +206,11 @@ class CaptureCoordinator(
                             false
                         } else {
                             terminal = true
-                            publishState(current.copy(status = CaptureStatus.Saved))
+                            publishState(current.copy(
+                                status = CaptureStatus.Saved,
+                                savedTime = committedAt.atZone(zone)
+                                    .format(DateTimeFormatter.ofPattern("HH:mm", Locale.ROOT)),
+                            ))
                             true
                         }
                     }

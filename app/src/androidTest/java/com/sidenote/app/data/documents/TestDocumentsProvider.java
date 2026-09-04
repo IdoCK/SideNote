@@ -42,6 +42,7 @@ public final class TestDocumentsProvider extends DocumentsProvider {
     };
 
     private static volatile boolean denyAccess;
+    private static volatile boolean failWrites;
 
     @Override
     public boolean onCreate() {
@@ -53,6 +54,7 @@ public final class TestDocumentsProvider extends DocumentsProvider {
         switch (method) {
             case METHOD_RESET:
                 denyAccess = false;
+                failWrites = false;
                 clearFixture();
                 File directory = fixtureDirectory();
                 if (!directory.mkdirs() && !directory.isDirectory()) {
@@ -61,6 +63,7 @@ public final class TestDocumentsProvider extends DocumentsProvider {
                 break;
             case METHOD_CLEAR:
                 denyAccess = false;
+                failWrites = false;
                 clearFixture();
                 break;
             case METHOD_GRANT_TREE:
@@ -75,6 +78,9 @@ public final class TestDocumentsProvider extends DocumentsProvider {
                 break;
             case METHOD_DENY_ACCESS:
                 denyAccess = true;
+                break;
+            case "fail-writes":
+                failWrites = Boolean.parseBoolean(arg);
                 break;
             default:
                 return super.call(method, arg, extras);
@@ -132,6 +138,9 @@ public final class TestDocumentsProvider extends DocumentsProvider {
         CancellationSignal signal
     ) throws FileNotFoundException {
         enforceAllowed();
+        if (failWrites && mode.contains("w")) {
+            throw new FileNotFoundException("Injected provider write failure before truncation");
+        }
         return ParcelFileDescriptor.open(fileForDocumentId(documentId), ParcelFileDescriptor.parseMode(mode));
     }
 
@@ -173,6 +182,10 @@ public final class TestDocumentsProvider extends DocumentsProvider {
 
     public static void denyAccess(ContentResolver contentResolver) {
         control(contentResolver, METHOD_DENY_ACCESS);
+    }
+
+    public static void failWrites(ContentResolver contentResolver, boolean fail) {
+        control(contentResolver, "fail-writes", Boolean.toString(fail));
     }
 
     private static void control(ContentResolver contentResolver, String method) {

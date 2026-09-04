@@ -33,6 +33,8 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
@@ -90,8 +92,9 @@ fun ReviewScreen(
             state.message?.let { message ->
                 Text(
                     text = message.everydayText(),
-                    color = Color(0xFFFFC7C7),
-                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
+                    color = ReviewText,
+                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp)
+                        .semantics { liveRegion = LiveRegionMode.Polite },
                 )
             }
             when (state.tab) {

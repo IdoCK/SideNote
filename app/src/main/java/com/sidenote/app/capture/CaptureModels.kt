@@ -9,6 +9,7 @@ data class CaptureState(
     val speechOwnedRange: TextRange? = null,
     val rms: Float = 0f,
     val status: CaptureStatus = CaptureStatus.Ready,
+    val savedTime: String? = null,
 )
 
 enum class CaptureStatus {

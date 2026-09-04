@@ -5,6 +5,7 @@ import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import android.view.HapticFeedbackConstants
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
@@ -21,6 +22,7 @@ import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import com.sidenote.app.AppContainer
 import com.sidenote.app.MainActivity
+import com.sidenote.app.R
 import com.sidenote.app.SideNoteApplication
 import com.sidenote.app.capture.ui.CaptureScreen
 import com.sidenote.app.capture.ui.LocalReducedMotion
@@ -197,7 +199,16 @@ class CaptureActivity : ComponentActivity() {
             haptic = HapticConfirmation {
                 window.decorView.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
             },
-            closer = CaptureCloser(::finish),
+            closer = CaptureCloser {
+                val closing = current.closingState()
+                val confirmation = when (closing.status) {
+                    CaptureStatus.Saved -> closing.savedTime?.let { getString(R.string.capture_saved, it) }
+                    CaptureStatus.Discarded -> getString(R.string.capture_discarded)
+                    else -> null
+                }
+                confirmation?.let { Toast.makeText(this, it, Toast.LENGTH_SHORT).show() }
+                finish()
+            },
         )
         viewModel = current
         current.start(intent, settings)

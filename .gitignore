@@ -12,3 +12,9 @@ local.properties
 *.iml
 *.ipr
 *.iws
+
+# Local acceptance captures and signing secrets
+*.jks
+*.keystore
+acceptance-artifacts/
+*.hprof

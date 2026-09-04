@@ -5,12 +5,14 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.windowInsetsPadding
@@ -31,6 +33,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDirection
@@ -38,6 +43,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.sidenote.app.R
 import com.sidenote.app.capture.CaptureState
+import com.sidenote.app.capture.CaptureStatus
 import com.sidenote.app.data.markdown.ProjectSyntax
 
 const val CAPTURE_ROOT_TAG = "capture-root"
@@ -100,6 +106,21 @@ fun CaptureScreen(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.Top,
             ) {
+                val errorMessage = when (state.status) {
+                    CaptureStatus.SaveFailed -> R.string.capture_save_failed
+                    CaptureStatus.SpeechUnavailable -> R.string.capture_voice_unavailable
+                    else -> null
+                }
+                errorMessage?.let { message ->
+                    Text(
+                        text = stringResource(message),
+                        color = CaptureVisualContract.Paper,
+                        modifier = Modifier
+                            .fillMaxWidth(CaptureVisualContract.CardWidthFraction)
+                            .padding(bottom = 8.dp)
+                            .semantics { liveRegion = LiveRegionMode.Polite },
+                    )
+                }
                 if (projects.isNotEmpty()) {
                     FlowRow(
                         modifier = Modifier
@@ -188,7 +209,9 @@ private fun WritingCard(
 @Composable
 private fun ProjectChip(project: String) {
     Surface(
-        modifier = Modifier.testTag("$PROJECT_CHIP_TAG_PREFIX.$project"),
+        // Bound the paragraph before RTL alignment; otherwise a shrink-wrapped label can
+        // align to FlowRow's loose maximum width and draw outside its measured chip.
+        modifier = Modifier.width(IntrinsicSize.Max).testTag("$PROJECT_CHIP_TAG_PREFIX.$project"),
         color = CaptureVisualContract.Chip,
         contentColor = CaptureVisualContract.Paper,
         shape = androidx.compose.foundation.shape.RoundedCornerShape(50),

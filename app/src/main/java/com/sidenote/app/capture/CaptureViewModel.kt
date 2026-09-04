@@ -102,6 +102,9 @@ class CaptureViewModel(
         host.detach(token)
     }
 
+    // Read the coordinator directly at close: its StateFlow forwarding collector may still be queued.
+    fun closingState(): CaptureState = coordinator?.state?.value ?: state.value
+
     @Suppress("UNUSED_PARAMETER")
     fun start(intent: Intent, preloadedSettings: AppSettings? = null) {
         if (!started.compareAndSet(false, true)) return

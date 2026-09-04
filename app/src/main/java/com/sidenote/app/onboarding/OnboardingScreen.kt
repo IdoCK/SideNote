@@ -22,6 +22,8 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -101,7 +103,13 @@ fun OnboardingScreen(
                 )
                 OnboardingStep.QuickTap -> QuickTapStep(onContinue)
             }
-            message?.let { Text(it, color = Color(0xFFFFC7C7)) }
+            message?.let {
+                Text(
+                    it,
+                    color = Color(0xFFF4F1EA),
+                    modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                )
+            }
         }
     }
 }
