@@ -231,7 +231,17 @@ class CaptureCoordinator(
                     onRecoveryPersistenceResult(false)
                 }
                 repository.append(preparation.text, committedAt, zone).also { outcome ->
-                    if (outcome == AppendResult.Success) ownedRecovery.clear()
+                    if (outcome == AppendResult.Success) {
+                        try {
+                            ownedRecovery.clear()
+                        } catch (error: CancellationException) {
+                            throw error
+                        } catch (_: Exception) {
+                            // Markdown is already committed. Keep Saved as the source of truth;
+                            // the process-owned handoff masks and retries this stale mirror.
+                            onRecoveryPersistenceResult(false)
+                        }
+                    }
                 }
             }
             when (result) {

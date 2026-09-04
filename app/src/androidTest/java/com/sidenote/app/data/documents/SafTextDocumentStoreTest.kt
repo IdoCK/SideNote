@@ -1,9 +1,12 @@
 package com.sidenote.app.data.documents
 
 import android.Manifest
+import android.provider.DocumentsContract
+import androidx.documentfile.provider.DocumentFile
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.google.common.truth.Truth.assertThat
+import java.nio.charset.StandardCharsets
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Before
@@ -171,4 +174,111 @@ class SafTextDocumentStoreTest {
         TestDocumentsProvider.failWrites(context.contentResolver, false)
         assertThat(store.read("2026-08-27.md")).isEqualTo(original)
     }
+
+    @Test
+    fun emptyUndeletableStageDoesNotBlockMissingNewTarget() = runTest {
+        TestDocumentsProvider.supportDelete(context.contentResolver, false)
+        TestDocumentsProvider.failWrites(context.contentResolver, true)
+
+        assertThat(store.writeAtomically("2026-08-27.md", null, "replacement"))
+            .isEqualTo(WriteOutcome.Failure(RepositoryError.WriteFailed))
+        TestDocumentsProvider.failWrites(context.contentResolver, false)
+        val stage = ownedArtifact(".stage")
+        assertThat(readRaw(stage)).isEmpty()
+
+        assertThat(store.read("2026-08-27.md")).isNull()
+        assertThat(store.listNames()).isEmpty()
+        assertThat(readRaw(stage)).isEmpty()
+    }
+
+    @Test
+    fun incompleteUndeletableStageDoesNotBlockVerifiedOriginal() = runTest {
+        val original = "# 2026-08-27\n\n- [ ] **08:00** Original\n"
+        assertThat(store.writeAtomically("2026-08-27.md", null, original))
+            .isEqualTo(WriteOutcome.Success)
+        TestDocumentsProvider.supportDelete(context.contentResolver, false)
+        TestDocumentsProvider.failWrites(context.contentResolver, true)
+
+        assertThat(store.writeAtomically("2026-08-27.md", original, "replacement"))
+            .isEqualTo(WriteOutcome.Failure(RepositoryError.WriteFailed))
+        TestDocumentsProvider.failWrites(context.contentResolver, false)
+
+        assertThat(store.read("2026-08-27.md")).isEqualTo(original)
+        assertThat(store.listNames()).containsExactly("2026-08-27.md")
+        assertThat(readRaw(ownedArtifact(".stage"))).isEmpty()
+    }
+
+    @Test
+    fun partialStageAllowsVerifiedBackupRestoreWhenTargetIsMissing() = runTest {
+        val original = "# 2026-08-27\n\n- [ ] **08:00** Original\n"
+        val replacement = "# 2026-08-27\n\n- [x] **08:00** Original\n"
+        assertThat(store.writeAtomically("2026-08-27.md", null, original))
+            .isEqualTo(WriteOutcome.Success)
+        TestDocumentsProvider.supportDelete(context.contentResolver, false)
+        TestDocumentsProvider.failRenameAfterMutations(context.contentResolver, 1)
+        assertThat(store.writeAtomically("2026-08-27.md", original, replacement))
+            .isEqualTo(WriteOutcome.Uncertain(RepositoryError.WriteFailed))
+        val stage = ownedArtifact(".stage")
+        writeRaw(stage, "partial replacement")
+
+        assertThat(store.read("2026-08-27.md")).isEqualTo(original)
+        assertThat(store.listNames()).containsExactly("2026-08-27.md")
+        assertThat(readRaw(stage)).isEqualTo("partial replacement")
+    }
+
+    @Test
+    fun partialStageAndValidBackupNeverOverwriteConflictingTarget() = runTest {
+        val original = "# 2026-08-27\n\n- [ ] **08:00** Original\n"
+        val replacement = "# 2026-08-27\n\n- [x] **08:00** Original\n"
+        val external = "# 2026-08-27\n\n- [ ] **09:00** External edit\n"
+        assertThat(store.writeAtomically("2026-08-27.md", null, original))
+            .isEqualTo(WriteOutcome.Success)
+        TestDocumentsProvider.supportDelete(context.contentResolver, false)
+        TestDocumentsProvider.failRenameAfterMutations(context.contentResolver, 1)
+        assertThat(store.writeAtomically("2026-08-27.md", original, replacement))
+            .isEqualTo(WriteOutcome.Uncertain(RepositoryError.WriteFailed))
+        writeRaw(ownedArtifact(".stage"), "partial replacement")
+        val target = createRaw("2026-08-27.md")
+        writeRaw(target, external)
+
+        val failure = runCatching { store.read("2026-08-27.md") }.exceptionOrNull()
+
+        assertThat(failure).isInstanceOf(DocumentStoreException::class.java)
+        assertThat((failure as DocumentStoreException).error)
+            .isEqualTo(RepositoryError.WriteFailed)
+        assertThat(readRaw(target)).isEqualTo(external)
+        assertThat(ownedArtifact(".backup")).isNotNull()
+        assertThat(readRaw(ownedArtifact(".stage"))).isEqualTo("partial replacement")
+    }
+
+    private fun ownedArtifact(suffix: String): DocumentFile = rawRoot().listFiles().single {
+        it.name?.startsWith(".sidenote-") == true && it.name?.endsWith(suffix) == true
+    }
+
+    private fun rawRoot(): DocumentFile = checkNotNull(
+        DocumentFile.fromTreeUri(context, TestDocumentsProvider.treeUri()),
+    )
+
+    private fun createRaw(name: String): DocumentFile {
+        val uri = checkNotNull(
+            DocumentsContract.createDocument(
+                context.contentResolver,
+                rawRoot().uri,
+                "text/plain",
+                name,
+            ),
+        )
+        return checkNotNull(DocumentFile.fromSingleUri(context, uri))
+    }
+
+    private fun writeRaw(document: DocumentFile, text: String) {
+        checkNotNull(context.contentResolver.openOutputStream(document.uri, "wt"))
+            .bufferedWriter(StandardCharsets.UTF_8)
+            .use { it.write(text) }
+    }
+
+    private fun readRaw(document: DocumentFile): String =
+        checkNotNull(context.contentResolver.openInputStream(document.uri)).use {
+            it.readBytes().toString(StandardCharsets.UTF_8)
+        }
 }

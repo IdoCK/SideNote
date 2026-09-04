@@ -17,6 +17,7 @@ class CaptureRecoveryHandoff(
     private val submissionLock = Any()
     private var activeSessionId = 0L
     private var tail: Job = CompletableDeferred(Unit)
+    private var committedRecoveryCleanupPending = false
 
     fun openSession(): CaptureRecoverySession = synchronized(submissionLock) {
         CaptureRecoverySession(
@@ -30,7 +31,20 @@ class CaptureRecoveryHandoff(
             sessionId = sessionId,
             staleResult = RecoveryLoadResult.Empty,
         ) {
-            store.load()
+            if (!committedRecoveryCleanupPending) {
+                store.load()
+            } else {
+                try {
+                    store.clear()
+                    committedRecoveryCleanupPending = false
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (_: Exception) {
+                    // The process observed a confirmed append before cleanup failed. Never
+                    // re-expose that known-stale mirror; a later load will retry the clear.
+                }
+                RecoveryLoadResult.Empty
+            }
         }.await()
 
     internal suspend fun save(sessionId: Long, draft: RecoveryDraft) {
@@ -40,6 +54,7 @@ class CaptureRecoveryHandoff(
     internal suspend fun clear(sessionId: Long) {
         enqueueForActiveSession(sessionId, staleResult = false) {
             store.clear()
+            committedRecoveryCleanupPending = false
             true
         }.await()
     }
@@ -50,14 +65,37 @@ class CaptureRecoveryHandoff(
     ): com.sidenote.app.data.documents.AppendResult = enqueueForActiveSession(
         sessionId,
         staleResult = com.sidenote.app.data.documents.AppendResult.Conflict,
-    ) { operation(store) }.await()
+    ) { operation(commitRecoveryStore()) }.await()
 
     internal fun enqueueSave(
         sessionId: Long,
         draft: RecoveryDraft,
     ): Deferred<Boolean> = enqueueForActiveSession(sessionId, staleResult = false) {
         store.save(draft)
+        committedRecoveryCleanupPending = false
         true
+    }
+
+    private fun commitRecoveryStore(): RecoveryDraftStore = object : RecoveryDraftStore {
+        override suspend fun load(): RecoveryLoadResult = store.load()
+
+        override suspend fun save(draft: RecoveryDraft) {
+            store.save(draft)
+            committedRecoveryCleanupPending = false
+        }
+
+        override suspend fun clear() {
+            committedRecoveryCleanupPending = true
+            try {
+                store.clear()
+                committedRecoveryCleanupPending = false
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                // A confirmed append must not become a failed append because cleanup failed.
+                // The pending marker is process-local and is retried before any later load.
+            }
+        }
     }
 
     private fun <T> enqueueForActiveSession(

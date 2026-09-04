@@ -44,6 +44,7 @@ public final class TestDocumentsProvider extends DocumentsProvider {
     private static volatile boolean denyAccess;
     private static volatile boolean failWrites;
     private static volatile boolean supportsRename = true;
+    private static volatile boolean supportsDelete = true;
     private static volatile int renameFailureCountdown;
 
     @Override
@@ -58,6 +59,7 @@ public final class TestDocumentsProvider extends DocumentsProvider {
                 denyAccess = false;
                 failWrites = false;
                 supportsRename = true;
+                supportsDelete = true;
                 renameFailureCountdown = 0;
                 clearFixture();
                 File directory = fixtureDirectory();
@@ -69,6 +71,7 @@ public final class TestDocumentsProvider extends DocumentsProvider {
                 denyAccess = false;
                 failWrites = false;
                 supportsRename = true;
+                supportsDelete = true;
                 renameFailureCountdown = 0;
                 clearFixture();
                 break;
@@ -90,6 +93,9 @@ public final class TestDocumentsProvider extends DocumentsProvider {
                 break;
             case "support-rename":
                 supportsRename = Boolean.parseBoolean(arg);
+                break;
+            case "support-delete":
+                supportsDelete = Boolean.parseBoolean(arg);
                 break;
             case "fail-rename-after-mutations":
                 renameFailureCountdown = Integer.parseInt(Objects.requireNonNull(arg));
@@ -196,6 +202,9 @@ public final class TestDocumentsProvider extends DocumentsProvider {
     @Override
     public void deleteDocument(String documentId) throws FileNotFoundException {
         enforceAllowed();
+        if (!supportsDelete) {
+            throw new FileNotFoundException("Delete is not supported");
+        }
         File file = fileForDocumentId(documentId);
         if (file.exists() && !file.delete()) {
             throw new FileNotFoundException("Could not delete " + file.getName());
@@ -228,6 +237,10 @@ public final class TestDocumentsProvider extends DocumentsProvider {
 
     public static void supportRename(ContentResolver contentResolver, boolean supported) {
         control(contentResolver, "support-rename", Boolean.toString(supported));
+    }
+
+    public static void supportDelete(ContentResolver contentResolver, boolean supported) {
+        control(contentResolver, "support-delete", Boolean.toString(supported));
     }
 
     public static void failRenameAfterMutations(ContentResolver contentResolver, int mutations) {
@@ -266,7 +279,7 @@ public final class TestDocumentsProvider extends DocumentsProvider {
             .add(
                 DocumentsContract.Document.COLUMN_FLAGS,
                 DocumentsContract.Document.FLAG_SUPPORTS_WRITE
-                    | DocumentsContract.Document.FLAG_SUPPORTS_DELETE
+                    | (supportsDelete ? DocumentsContract.Document.FLAG_SUPPORTS_DELETE : 0)
                     | (supportsRename ? DocumentsContract.Document.FLAG_SUPPORTS_RENAME : 0)
             )
             .add(DocumentsContract.Document.COLUMN_SIZE, file.length())

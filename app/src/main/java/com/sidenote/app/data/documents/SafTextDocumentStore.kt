@@ -187,18 +187,26 @@ class SafTextDocumentStore(
             val metadata = transaction.first().metadata
             val stage = transaction.singleOrNull { it.kind == ArtifactKind.Stage }?.document
             val backup = transaction.singleOrNull { it.kind == ArtifactKind.Backup }?.document
-            if (stage != null && readDocument(stage).contentHash() != metadata.replacementHash) {
-                return@all false
+            val stageState = when {
+                stage == null -> StageState.Absent
+                readDocument(stage).contentHash() == metadata.replacementHash -> StageState.Complete
+                else -> StageState.Incomplete
             }
-            if (backup != null && readDocument(backup).contentHash() != metadata.expectedHash) {
-                return@all false
+            val verifiedBackup = backup?.takeIf {
+                metadata.expectedHash != null &&
+                    readDocument(it).contentHash() == metadata.expectedHash
             }
+            val completeStage = stage.takeIf { stageState == StageState.Complete }
             when (val target = findExact(root, metadata.targetName)) {
                 ExactDocument.Ambiguous -> false
                 ExactDocument.Missing -> when {
-                    backup != null -> restoreBackup(root, backup, metadata, stage)
-                    stage != null && metadata.expectedHash == null -> {
-                        deleteOwnedIfSupported(stage)
+                    verifiedBackup != null ->
+                        restoreBackup(root, verifiedBackup, metadata, completeStage)
+                    metadata.expectedHash == null -> {
+                        // Creation had not produced an authoritative target. A complete stage
+                        // can be removed, while partial/unknown bytes remain hidden as an owned
+                        // quarantine artifact and are never promoted to Markdown truth.
+                        completeStage?.let(::deleteOwnedIfSupported)
                         true
                     }
                     else -> false
@@ -208,8 +216,8 @@ class SafTextDocumentStore(
                     if (targetHash != metadata.expectedHash && targetHash != metadata.replacementHash) {
                         false
                     } else {
-                        backup?.let(::deleteOwnedIfSupported)
-                        stage?.let(::deleteOwnedIfSupported)
+                        verifiedBackup?.let(::deleteOwnedIfSupported)
+                        completeStage?.let(::deleteOwnedIfSupported)
                         true
                     }
                 }
@@ -434,6 +442,12 @@ class SafTextDocumentStore(
     private enum class ArtifactKind(val suffix: String) {
         Stage("stage"),
         Backup("backup"),
+    }
+
+    private enum class StageState {
+        Absent,
+        Complete,
+        Incomplete,
     }
 
     private companion object {

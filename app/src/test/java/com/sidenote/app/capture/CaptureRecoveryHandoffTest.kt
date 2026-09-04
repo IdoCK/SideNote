@@ -2,6 +2,7 @@ package com.sidenote.app.capture
 
 import androidx.compose.ui.text.TextRange
 import com.google.common.truth.Truth.assertThat
+import com.sidenote.app.data.documents.AppendResult
 import com.sidenote.app.data.recovery.RecoveryDraft
 import com.sidenote.app.data.recovery.RecoveryDraftStore
 import com.sidenote.app.data.recovery.RecoveryLoadResult
@@ -54,6 +55,47 @@ class CaptureRecoveryHandoffTest {
         }
     }
 
+    @Test
+    fun failedPostCommitClearIsMaskedFromNextSessionAndRetried() = runTest {
+        val store = ThrowingClearStore(draft("already committed"))
+        val processJob = SupervisorJob()
+        val processScope = CoroutineScope(processJob + StandardTestDispatcher(testScheduler))
+        val handoff = CaptureRecoveryHandoff(store, processScope)
+
+        try {
+            val committingSession = handoff.openSession()
+            val commit = async {
+                committingSession.reconcile { ownedRecovery ->
+                    ownedRecovery.save(draft("already committed"))
+                    AppendResult.Success.also { ownedRecovery.clear() }
+                }
+            }
+            advanceUntilIdle()
+
+            assertThat(commit.await()).isEqualTo(AppendResult.Success)
+            assertThat(store.clearCalls).isEqualTo(1)
+
+            val nextSession = handoff.openSession()
+            val maskedLoad = async { nextSession.load() }
+            advanceUntilIdle()
+
+            assertThat(maskedLoad.await()).isEqualTo(RecoveryLoadResult.Empty)
+            assertThat(store.loadCalls).isEqualTo(0)
+            assertThat(store.clearCalls).isEqualTo(2)
+
+            store.throwOnClear = false
+            val retriedLoad = async { nextSession.load() }
+            advanceUntilIdle()
+
+            assertThat(retriedLoad.await()).isEqualTo(RecoveryLoadResult.Empty)
+            assertThat(store.persisted).isNull()
+            assertThat(store.loadCalls).isEqualTo(0)
+            assertThat(store.clearCalls).isEqualTo(3)
+        } finally {
+            processScope.cancel()
+        }
+    }
+
     private fun draft(text: String): RecoveryDraft = RecoveryDraft(
         text = text,
         selection = TextRange(text.length),
@@ -80,6 +122,29 @@ private class SuspendedFirstSaveStore : RecoveryDraftStore {
     }
 
     override suspend fun clear() {
+        persisted = null
+    }
+}
+
+private class ThrowingClearStore(
+    @Volatile var persisted: RecoveryDraft?,
+) : RecoveryDraftStore {
+    var throwOnClear = true
+    var clearCalls = 0
+    var loadCalls = 0
+
+    override suspend fun load(): RecoveryLoadResult {
+        loadCalls += 1
+        return persisted?.let(RecoveryLoadResult::Draft) ?: RecoveryLoadResult.Empty
+    }
+
+    override suspend fun save(draft: RecoveryDraft) {
+        persisted = draft
+    }
+
+    override suspend fun clear() {
+        clearCalls += 1
+        if (throwOnClear) throw java.io.IOException("recovery unavailable")
         persisted = null
     }
 }

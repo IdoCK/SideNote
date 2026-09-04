@@ -405,6 +405,22 @@ class CaptureCoordinatorTest {
     }
 
     @Test
+    fun recoveryClearFailureAfterConfirmedAppendStillReportsSavedTruth() = runTest {
+        recovery.clearFailure = java.io.IOException("recovery unavailable")
+        coordinator.start(false, RecoveryDraft("already committed", TextRange(17), false))
+
+        coordinator.complete(CompletionSignal.ScreenOff)
+
+        assertThat(repository.appends)
+            .containsExactly(AppendCall("already committed", instant, zone))
+        assertThat(coordinator.state.value.status).isEqualTo(CaptureStatus.Saved)
+        assertThat(coordinator.state.value.recoveryWriteFailed).isTrue()
+        assertThat(haptic.confirmCalls).isEqualTo(1)
+        assertThat(notificationRefresher.refreshCalls).isEqualTo(1)
+        assertThat(closer.closeCalls).isEqualTo(1)
+    }
+
+    @Test
     fun cancellationDuringNotificationRefreshCannotLeaveACommittedDraftRecoverable() = runTest {
         val suspendedRefresh = notificationRefresher.suspendNextRefresh()
         coordinator.start(false, RecoveryDraft("save once", TextRange(9), false))

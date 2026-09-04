@@ -90,6 +90,7 @@ class CaptureViewModel(
     private var captureLifecycleGeneration = 0L
     private var speechStartupJob: Job? = null
     private var speechRestartJob: Job? = null
+    private var projectSuggestionJob: Job? = null
     private var terminalCompletion = false
     private var coordinator: CaptureCoordinator? = null
     private var recoveryWriter: RecoveryDraftWriter? = null
@@ -269,22 +270,30 @@ class CaptureViewModel(
 
     /** Protected history is queried only after the host has observed an unlocked state. */
     fun refreshProjectSuggestions(unlocked: Boolean) {
+        projectSuggestionJob?.cancel()
+        projectSuggestionJob = null
         projectSuggestionAccess = unlocked
         val generation = suggestionAccessGeneration.incrementAndGet()
         if (!unlocked) {
             coordinator?.onProjectSuggestions(emptyList())
             return
         }
-        viewModelScope.launch {
+        projectSuggestionJob = viewModelScope.launch {
             val currentCoordinator = awaitCoordinator() ?: return@launch
             val projects = try {
-                dispatchedRepository.days()
-                    .asSequence()
-                    .flatMap { day -> day.entries.asSequence() }
-                    .flatMap { entry -> entry.projects.asSequence() }
-                    .associateBy(ProjectToken::key)
-                    .values
-                    .sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER, ProjectToken::display))
+                withContext(dependencies.ioDispatcher) {
+                    if (
+                        !projectSuggestionAccess ||
+                        generation != suggestionAccessGeneration.get()
+                    ) return@withContext null
+                    dependencies.repository.days()
+                        .asSequence()
+                        .flatMap { day -> day.entries.asSequence() }
+                        .flatMap { entry -> entry.projects.asSequence() }
+                        .associateBy(ProjectToken::key)
+                        .values
+                        .sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER, ProjectToken::display))
+                } ?: return@launch
             } catch (error: CancellationException) {
                 throw error
             } catch (_: Exception) {

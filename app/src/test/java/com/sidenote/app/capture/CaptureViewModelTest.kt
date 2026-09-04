@@ -406,6 +406,64 @@ class CaptureViewModelTest {
             assertThat(viewModel.state.value.projectSuggestions).isEmpty()
         }
 
+    @Test
+    fun lockingBeforeUnlockedScanCoroutineDispatchPreventsHistoryRead() =
+        runTest(mainDispatcher) {
+            val io = QueuedIoDispatcher()
+            val repository = SuggestionRepository(
+                listOf(day("2026-08-30", "- [ ] **09:00** Plan @Home\n")),
+            )
+            val viewModel = viewModel(
+                SessionRecordingSpeechEngine(),
+                this,
+                repository = repository,
+                ioDispatcher = io,
+            )
+            viewModel.start(
+                Intent(),
+                AppSettings(treeUri = null, voiceOnAtLaunch = false, onboardingComplete = true),
+            )
+            runCurrent()
+
+            viewModel.refreshProjectSuggestions(unlocked = true)
+            viewModel.refreshProjectSuggestions(unlocked = false)
+            runCurrent()
+            io.runPending()
+            runCurrent()
+
+            assertThat(repository.dayReads).isEqualTo(0)
+            assertThat(viewModel.state.value.projectSuggestions).isEmpty()
+        }
+
+    @Test
+    fun lockingWhileUnlockedScanIsQueuedForIoPreventsHistoryRead() =
+        runTest(mainDispatcher) {
+            val io = QueuedIoDispatcher()
+            val repository = SuggestionRepository(
+                listOf(day("2026-08-30", "- [ ] **09:00** Plan @Home\n")),
+            )
+            val viewModel = viewModel(
+                SessionRecordingSpeechEngine(),
+                this,
+                repository = repository,
+                ioDispatcher = io,
+            )
+            viewModel.start(
+                Intent(),
+                AppSettings(treeUri = null, voiceOnAtLaunch = false, onboardingComplete = true),
+            )
+            runCurrent()
+
+            viewModel.refreshProjectSuggestions(unlocked = true)
+            runCurrent()
+            viewModel.refreshProjectSuggestions(unlocked = false)
+            io.runPending()
+            runCurrent()
+
+            assertThat(repository.dayReads).isEqualTo(0)
+            assertThat(viewModel.state.value.projectSuggestions).isEmpty()
+        }
+
     private fun viewModel(
         speech: SpeechEngine,
         recoveryScope: CoroutineScope,
