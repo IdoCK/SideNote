@@ -43,6 +43,8 @@ public final class TestDocumentsProvider extends DocumentsProvider {
 
     private static volatile boolean denyAccess;
     private static volatile boolean failWrites;
+    private static volatile boolean supportsRename = true;
+    private static volatile int renameFailureCountdown;
 
     @Override
     public boolean onCreate() {
@@ -55,6 +57,8 @@ public final class TestDocumentsProvider extends DocumentsProvider {
             case METHOD_RESET:
                 denyAccess = false;
                 failWrites = false;
+                supportsRename = true;
+                renameFailureCountdown = 0;
                 clearFixture();
                 File directory = fixtureDirectory();
                 if (!directory.mkdirs() && !directory.isDirectory()) {
@@ -64,6 +68,8 @@ public final class TestDocumentsProvider extends DocumentsProvider {
             case METHOD_CLEAR:
                 denyAccess = false;
                 failWrites = false;
+                supportsRename = true;
+                renameFailureCountdown = 0;
                 clearFixture();
                 break;
             case METHOD_GRANT_TREE:
@@ -81,6 +87,12 @@ public final class TestDocumentsProvider extends DocumentsProvider {
                 break;
             case "fail-writes":
                 failWrites = Boolean.parseBoolean(arg);
+                break;
+            case "support-rename":
+                supportsRename = Boolean.parseBoolean(arg);
+                break;
+            case "fail-rename-after-mutations":
+                renameFailureCountdown = Integer.parseInt(Objects.requireNonNull(arg));
                 break;
             default:
                 return super.call(method, arg, extras);
@@ -164,6 +176,32 @@ public final class TestDocumentsProvider extends DocumentsProvider {
         return fileDocumentId(displayName);
     }
 
+    @Override
+    public String renameDocument(String documentId, String displayName) throws FileNotFoundException {
+        enforceAllowed();
+        if (!supportsRename || displayName.contains("/") || displayName.contains("\\")) {
+            throw new FileNotFoundException("Rename is not supported");
+        }
+        File source = fileForDocumentId(documentId);
+        File destination = new File(fixtureDirectory(), displayName);
+        if (!source.renameTo(destination)) {
+            throw new FileNotFoundException("Could not rename " + source.getName());
+        }
+        if (renameFailureCountdown > 0 && --renameFailureCountdown == 0) {
+            throw new FileNotFoundException("Injected failure after rename mutation");
+        }
+        return fileDocumentId(displayName);
+    }
+
+    @Override
+    public void deleteDocument(String documentId) throws FileNotFoundException {
+        enforceAllowed();
+        File file = fileForDocumentId(documentId);
+        if (file.exists() && !file.delete()) {
+            throw new FileNotFoundException("Could not delete " + file.getName());
+        }
+    }
+
     public static Uri treeUri() {
         return DocumentsContract.buildTreeDocumentUri(AUTHORITY, ROOT_ID);
     }
@@ -186,6 +224,14 @@ public final class TestDocumentsProvider extends DocumentsProvider {
 
     public static void failWrites(ContentResolver contentResolver, boolean fail) {
         control(contentResolver, "fail-writes", Boolean.toString(fail));
+    }
+
+    public static void supportRename(ContentResolver contentResolver, boolean supported) {
+        control(contentResolver, "support-rename", Boolean.toString(supported));
+    }
+
+    public static void failRenameAfterMutations(ContentResolver contentResolver, int mutations) {
+        control(contentResolver, "fail-rename-after-mutations", Integer.toString(mutations));
     }
 
     private static void control(ContentResolver contentResolver, String method) {
@@ -217,7 +263,12 @@ public final class TestDocumentsProvider extends DocumentsProvider {
             .add(DocumentsContract.Document.COLUMN_DOCUMENT_ID, documentId)
             .add(DocumentsContract.Document.COLUMN_DISPLAY_NAME, file.getName())
             .add(DocumentsContract.Document.COLUMN_MIME_TYPE, "text/plain")
-            .add(DocumentsContract.Document.COLUMN_FLAGS, DocumentsContract.Document.FLAG_SUPPORTS_WRITE)
+            .add(
+                DocumentsContract.Document.COLUMN_FLAGS,
+                DocumentsContract.Document.FLAG_SUPPORTS_WRITE
+                    | DocumentsContract.Document.FLAG_SUPPORTS_DELETE
+                    | (supportsRename ? DocumentsContract.Document.FLAG_SUPPORTS_RENAME : 0)
+            )
             .add(DocumentsContract.Document.COLUMN_SIZE, file.length())
             .add(DocumentsContract.Document.COLUMN_LAST_MODIFIED, file.lastModified());
     }

@@ -26,6 +26,7 @@ import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 class AndroidSpeechEngine internal constructor(
     private val onlineFallbackAllowed: Boolean,
@@ -53,18 +54,25 @@ class AndroidSpeechEngine internal constructor(
     private var generation = 0L
     private var destroyed = false
     private var rmsSmoother = RmsSmoother(rmsAlpha)
+    private var finalization: CompletableDeferred<Unit>? = null
+    private var firstAttempt: Attempt? = Attempt.Local
+    private var onlineReady = true
 
     override suspend fun support(): SpeechAvailability {
         if (isDestroyed()) return SpeechAvailability.TypedOnly
 
         val local = supportedLanguages(Attempt.Local)
         if (isDestroyed()) return SpeechAvailability.TypedOnly
-        if (SpeechSupport.evaluate(local, emptySet(), fallbackAllowed = false) == SpeechAvailability.Available) {
-            return SpeechAvailability.Available
-        }
-
         val online = if (onlineFallbackAllowed) supportedLanguages(Attempt.Online) else emptySet()
         if (isDestroyed()) return SpeechAvailability.TypedOnly
+        synchronized(lock) {
+            onlineReady = online.containsAll(SpeechSupport.requiredLanguages)
+            firstAttempt = when {
+                local.containsAll(SpeechSupport.requiredLanguages) -> Attempt.Local
+                onlineFallbackAllowed && onlineReady -> Attempt.Online
+                else -> null
+            }
+        }
         return SpeechSupport.evaluate(local, online, onlineFallbackAllowed)
     }
 
@@ -127,7 +135,9 @@ class AndroidSpeechEngine internal constructor(
             rmsSmoother = RmsSmoother(rmsAlpha)
         }
         previous?.let(::cancelAndDestroySession)
-        startAttempt(currentGeneration, Attempt.Local)
+        val attempt = synchronized(lock) { firstAttempt }
+        if (attempt == null) listener.onUnavailable(SpeechFailure.LanguageNotSupported)
+        else startAttempt(currentGeneration, attempt)
     }
 
     override fun stop() {
@@ -135,10 +145,27 @@ class AndroidSpeechEngine internal constructor(
             if (destroyed) return
             generation += 1
             listener = null
+            finalization?.complete(Unit)
+            finalization = null
             rmsSmoother = RmsSmoother(rmsAlpha)
             active?.session.also { active = null }
         }
-        session?.let(::stopAndDestroySession)
+        session?.let(::cancelAndDestroySession)
+    }
+
+    override suspend fun finish() {
+        val pending = synchronized(lock) {
+            if (destroyed || active == null) return
+            val done = CompletableDeferred<Unit>()
+            finalization = done
+            active!!.session to done
+        }
+        try {
+            ignorePlatformFailure { mainThread.run { pending.first.stop() } }
+            withTimeoutOrNull(1500L) { pending.second.await() }
+        } finally {
+            stop()
+        }
     }
 
     override fun destroy() {
@@ -147,6 +174,8 @@ class AndroidSpeechEngine internal constructor(
             destroyed = true
             generation += 1
             listener = null
+            finalization?.complete(Unit)
+            finalization = null
             buildList {
                 active?.session?.let(::add)
                 addAll(probes)
@@ -175,7 +204,7 @@ class AndroidSpeechEngine internal constructor(
                 ) ?: continue
                 if (!isOwnedProbe(session)) break
                 val pathLanguages = if (attempt == Attempt.Local) {
-                    support.supportedOnDeviceLanguages
+                    support.installedOnDeviceLanguages
                 } else {
                     support.onlineLanguages
                 }
@@ -251,13 +280,14 @@ class AndroidSpeechEngine internal constructor(
                 )
                 return
             }
-            val currentListener = synchronized(lock) {
+            val delivery = synchronized(lock) {
                 if (!isCurrent(currentGeneration, activeSession.session)) return
                 active = null
-                listener
+                listener to finalization
             }
             destroySession(activeSession.session)
-            currentListener?.onFinal(text)
+            delivery.first?.onFinal(text)
+            delivery.second?.complete(Unit)
         }
 
         override fun onRmsChanged(rmsDb: Float) {
@@ -298,8 +328,10 @@ class AndroidSpeechEngine internal constructor(
                 return
             }
             FailureOutcome(
-                nextAttempt = attemptPolicy.nextAfter(attempt, failure),
+                nextAttempt = if (finalization != null || !onlineReady) null
+                    else attemptPolicy.nextAfter(attempt, failure),
                 listener = listener,
+                finalization = finalization,
             )
         }
         session?.let(::destroySession)
@@ -307,6 +339,7 @@ class AndroidSpeechEngine internal constructor(
             startAttempt(currentGeneration, outcome.nextAttempt)
         } else {
             outcome.listener?.onUnavailable(failure)
+            outcome.finalization?.complete(Unit)
         }
     }
 
@@ -373,14 +406,6 @@ class AndroidSpeechEngine internal constructor(
         null
     }
 
-    private fun stopAndDestroySession(session: RecognitionSession) {
-        try {
-            ignorePlatformFailure { mainThread.run { session.stop() } }
-        } finally {
-            destroySession(session)
-        }
-    }
-
     private fun cancelAndDestroySession(session: RecognitionSession) {
         try {
             ignorePlatformFailure { mainThread.run { session.cancel() } }
@@ -411,6 +436,7 @@ class AndroidSpeechEngine internal constructor(
     private data class FailureOutcome(
         val nextAttempt: Attempt?,
         val listener: SpeechEngine.Listener?,
+        val finalization: CompletableDeferred<Unit>?,
     )
 
     private companion object {

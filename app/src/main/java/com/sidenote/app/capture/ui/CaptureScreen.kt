@@ -52,6 +52,7 @@ const val CAPTURE_WRITING_REGION_TAG = "capture-writing-region"
 const val CAPTURE_CARD_TAG = "capture-card"
 const val CAPTURE_INPUT_TAG = "capture-input"
 const val PROJECT_CHIP_TAG_PREFIX = "project-chip"
+const val PROJECT_SUGGESTION_TAG_PREFIX = "project-suggestion"
 
 val LocalReducedMotion = staticCompositionLocalOf { false }
 
@@ -69,10 +70,14 @@ fun CaptureScreen(
     onTextChanged: (androidx.compose.ui.text.input.TextFieldValue) -> Unit,
     onVoiceToggle: () -> Unit,
     onDiscard: () -> Unit,
+    onRetryRecovery: () -> Unit = {},
 ) {
     CaptureSelectionScope {
         val projects = remember(state.draft.text) {
             ProjectSyntax.tokens(state.draft.text)
+        }
+        val suggestions = remember(state.draft, state.projectSuggestions) {
+            ProjectSuggestionEditor.matches(state.draft, state.projectSuggestions)
         }
         Column(
             modifier = Modifier
@@ -107,9 +112,19 @@ fun CaptureScreen(
                 verticalArrangement = Arrangement.Top,
             ) {
                 val errorMessage = when (state.status) {
-                    CaptureStatus.SaveFailed -> R.string.capture_save_failed
+                    CaptureStatus.RecoveryUnreadable -> R.string.capture_recovery_unreadable
+                    CaptureStatus.SaveFailed -> if (state.recoveryWriteFailed) {
+                        R.string.capture_save_and_recovery_failed
+                    } else {
+                        R.string.capture_save_failed
+                    }
+                    CaptureStatus.SaveUncertain -> if (state.recoveryWriteFailed) {
+                        R.string.capture_save_uncertain_without_recovery
+                    } else {
+                        R.string.capture_save_uncertain
+                    }
                     CaptureStatus.SpeechUnavailable -> R.string.capture_voice_unavailable
-                    else -> null
+                    else -> if (state.recoveryWriteFailed) R.string.capture_recovery_write_failed else null
                 }
                 errorMessage?.let { message ->
                     Text(
@@ -120,6 +135,11 @@ fun CaptureScreen(
                             .padding(bottom = 8.dp)
                             .semantics { liveRegion = LiveRegionMode.Polite },
                     )
+                }
+                if (state.status == CaptureStatus.RecoveryUnreadable) {
+                    TextButton(onClick = onRetryRecovery, modifier = Modifier.heightIn(min = 48.dp)) {
+                        Text(stringResource(R.string.capture_retry_recovery), color = CaptureVisualContract.Paper)
+                    }
                 }
                 if (projects.isNotEmpty()) {
                     FlowRow(
@@ -134,11 +154,33 @@ fun CaptureScreen(
                         }
                     }
                 }
+                if (suggestions.isNotEmpty()) {
+                    FlowRow(
+                        modifier = Modifier
+                            .fillMaxWidth(CaptureVisualContract.CardWidthFraction)
+                            .padding(bottom = 8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        suggestions.forEach { project ->
+                            TextButton(
+                                onClick = {
+                                    onTextChanged(ProjectSuggestionEditor.apply(state.draft, project))
+                                },
+                                modifier = Modifier
+                                    .heightIn(min = 48.dp)
+                                    .testTag("$PROJECT_SUGGESTION_TAG_PREFIX.${project.key}"),
+                            ) {
+                                Text("@${project.display}", color = CaptureVisualContract.Paper)
+                            }
+                        }
+                    }
+                }
                 WritingCard(
                     state = state,
                     onTextChanged = onTextChanged,
                 )
-                if (state.draft.text.isNotEmpty()) {
+                if (state.draft.text.isNotEmpty() || state.status == CaptureStatus.RecoveryUnreadable) {
                     Spacer(Modifier.height(8.dp))
                     TextButton(
                         onClick = onDiscard,
@@ -185,6 +227,8 @@ private fun WritingCard(
                 )
             }
             BasicTextField(
+                readOnly = state.status == CaptureStatus.RecoveryUnreadable ||
+                    state.status == CaptureStatus.Finalizing || state.status == CaptureStatus.Saving,
                 value = state.draft,
                 onValueChange = onTextChanged,
                 modifier = Modifier

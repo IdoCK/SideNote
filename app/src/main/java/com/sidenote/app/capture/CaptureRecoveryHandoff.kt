@@ -44,6 +44,14 @@ class CaptureRecoveryHandoff(
         }.await()
     }
 
+    internal suspend fun reconcile(
+        sessionId: Long,
+        operation: suspend (RecoveryDraftStore) -> com.sidenote.app.data.documents.AppendResult,
+    ): com.sidenote.app.data.documents.AppendResult = enqueueForActiveSession(
+        sessionId,
+        staleResult = com.sidenote.app.data.documents.AppendResult.Conflict,
+    ) { operation(store) }.await()
+
     internal fun enqueueSave(
         sessionId: Long,
         draft: RecoveryDraft,
@@ -100,6 +108,10 @@ class CaptureRecoverySession internal constructor(
     override suspend fun clear() {
         handoff.clear(sessionId)
     }
+
+    suspend fun reconcile(
+        operation: suspend (RecoveryDraftStore) -> com.sidenote.app.data.documents.AppendResult,
+    ): com.sidenote.app.data.documents.AppendResult = handoff.reconcile(sessionId, operation)
 
     fun flushInBackground(draft: RecoveryDraft): Deferred<Boolean> =
         handoff.enqueueSave(sessionId, draft)

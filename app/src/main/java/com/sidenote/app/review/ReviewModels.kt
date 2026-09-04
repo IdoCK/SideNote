@@ -13,6 +13,7 @@ enum class ReviewMessage {
     FileChanged,
     FolderAccessLost,
     CouldNotUpdate,
+    UpdateUncertain,
     CouldNotLoad,
 }
 
@@ -34,6 +35,7 @@ typealias ProjectEntry = ReviewEntry
 data class ReviewDay(
     val date: LocalDate,
     val entries: List<ReviewEntry>,
+    val sourceText: String = "",
 )
 
 data class ProjectGroup(

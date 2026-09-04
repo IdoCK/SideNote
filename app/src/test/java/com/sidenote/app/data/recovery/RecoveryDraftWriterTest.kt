@@ -13,6 +13,21 @@ import org.junit.Test
 @OptIn(ExperimentalCoroutinesApi::class)
 class RecoveryDraftWriterTest {
     @Test
+    fun throwingDebounceAndFlushAreRecoverableRatherThanUnhandled() = runTest {
+        val store = object : RecoveryDraftStore {
+            override suspend fun load(): RecoveryLoadResult = RecoveryLoadResult.Empty
+            override suspend fun save(draft: RecoveryDraft) { throw java.io.IOException("disk full") }
+            override suspend fun clear() = Unit
+        }
+        val writer = RecoveryDraftWriter(store, backgroundScope, 50.milliseconds)
+        writer.onDraftChanged(draft("keep in memory"))
+        advanceTimeBy(51)
+        runCurrent()
+        val failure = runCatching { writer.flushOnStop(draft("keep in memory")) }.exceptionOrNull()
+        assertThat(failure).isNull()
+    }
+
+    @Test
     fun draftChangesWriteOnlyTheLatestDraftAfterDebounce() = runTest {
         val store = RecordingRecoveryDraftStore()
         val writer = RecoveryDraftWriter(store, backgroundScope, 500.milliseconds)
@@ -42,6 +57,18 @@ class RecoveryDraftWriterTest {
         advanceUntilIdle()
 
         assertThat(store.saved).containsExactly(latest)
+    }
+
+    @Test
+    fun cancelPendingDropsTheDebouncedWriteWithoutPersistingIt() = runTest {
+        val store = RecordingRecoveryDraftStore()
+        val writer = RecoveryDraftWriter(store, backgroundScope, 500.milliseconds)
+
+        writer.onDraftChanged(draft("must not outlive completion"))
+        writer.cancelPending()
+        advanceUntilIdle()
+
+        assertThat(store.saved).isEmpty()
     }
 
     private fun draft(text: String): RecoveryDraft =

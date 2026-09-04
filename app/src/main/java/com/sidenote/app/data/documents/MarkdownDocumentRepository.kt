@@ -38,6 +38,7 @@ class MarkdownDocumentRepository(
         when (val outcome = store.writeAtomically(fileName, existing, replacement)) {
             WriteOutcome.Success -> AppendResult.Success
             WriteOutcome.Conflict -> AppendResult.Conflict
+            is WriteOutcome.Uncertain -> AppendResult.Uncertain(outcome.error)
             is WriteOutcome.Failure -> AppendResult.Failure(outcome.error)
         }
     }
@@ -71,6 +72,7 @@ class MarkdownDocumentRepository(
         when (val outcome = store.writeAtomically(fileName, current, replacement)) {
             WriteOutcome.Success -> UpdateResult.Success
             WriteOutcome.Conflict -> UpdateResult.Conflict
+            is WriteOutcome.Uncertain -> UpdateResult.Uncertain(outcome.error)
             is WriteOutcome.Failure -> UpdateResult.Failure(outcome.error)
         }
     }

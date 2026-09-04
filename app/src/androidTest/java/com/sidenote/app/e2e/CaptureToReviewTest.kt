@@ -239,7 +239,14 @@ internal class DocumentAcceptanceFixture : AutoCloseable, AppContainer {
 
     fun readDocument(name: String): String? {
         val file = DocumentFile.fromTreeUri(context, TestDocumentsProvider.treeUri())!!.findFile(name) ?: return null
-        return context.contentResolver.openInputStream(file.uri)!!.bufferedReader(Charsets.UTF_8).use { it.readText() }
+        return try {
+            context.contentResolver.openInputStream(file.uri)
+                ?.bufferedReader(Charsets.UTF_8)
+                ?.use { it.readText() }
+        } catch (_: java.io.FileNotFoundException) {
+            // A guarded replacement briefly has no target between the two sibling renames.
+            null
+        }
     }
 
     override fun captureDependencies() = CaptureDependencies(

@@ -29,7 +29,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -50,6 +52,7 @@ fun SettingsScreen(
     onOnlineFallbackChange: (Boolean) -> Unit,
     onRequestPermissions: () -> Unit,
     modifier: Modifier = Modifier,
+    message: String? = null,
 ) {
     var showDisclosure by remember { mutableStateOf(false) }
     Surface(
@@ -76,6 +79,13 @@ fun SettingsScreen(
                     style = MaterialTheme.typography.headlineMedium,
                     fontWeight = FontWeight.Bold,
                     modifier = Modifier.padding(start = 8.dp).semantics { heading() },
+                )
+            }
+            message?.let { feedback ->
+                Text(
+                    text = feedback,
+                    color = ReviewText,
+                    modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
                 )
             }
             SettingSection("Notes folder") {

@@ -13,12 +13,16 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsOff
 import androidx.compose.ui.test.assertIsOn
 import androidx.compose.ui.test.getUnclippedBoundsInRoot
+import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.junit4.v2.createEmptyComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollToNode
+import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.test.swipeLeft
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.Density
 import androidx.test.core.app.ActivityScenario
@@ -155,6 +159,35 @@ class ReviewScreenTest {
     }
 
     @Test
+    fun proseOnlyMarkdownIsVisibleAsReadOnlySourceContent() {
+        val date = LocalDate.parse("2026-08-28")
+        val raw = "# 2026-08-28\n\nOrdinary prose that SideNote does not edit.\n- [ ] malformed task\n"
+
+        setContent {
+            ReviewScreen(
+                state = ReviewState(
+                    days = listOf(ReviewDay(date, emptyList(), sourceText = raw)),
+                    selectedDate = date,
+                ),
+                onShowDates = {},
+                onShowProjects = {},
+                onPreviousDay = {},
+                onNextDay = {},
+                onOpenSettings = {},
+                onToggleExpanded = {},
+                onProcessedChange = { _, _ -> },
+                onOpenProject = {},
+                onOpenSourceDay = {},
+            )
+        }
+
+        compose.onNodeWithText("Original Markdown · read only").assertIsDisplayed()
+        compose.onNodeWithText("Ordinary prose that SideNote does not edit.", substring = true)
+            .assertIsDisplayed()
+        compose.onNodeWithText("- [ ] malformed task", substring = true).assertIsDisplayed()
+    }
+
+    @Test
     fun projectsShowCountsNewestFirstAndNavigateThroughOriginalSourceDay() {
         val older = entry("2026-08-26", "08:15", "@SideNote old", false, 0)
         val newer = entry("2026-08-27", "19:45", "@sidenote new", false, 0)
@@ -204,6 +237,49 @@ class ReviewScreenTest {
     }
 
     @Test
+    fun longDateBrowserAndHorizontalSwipeWorkAlongsideExplicitDayButtons() {
+        val days = (0 until 120).map { offset ->
+            ReviewDay(LocalDate.of(2026, 1, 1).plusDays(offset.toLong()), emptyList())
+        }
+        var state by mutableStateOf(
+            ReviewState(days = days, selectedDate = days[60].date),
+        )
+        setContent {
+            ReviewScreen(
+                state = state,
+                onShowDates = {},
+                onShowProjects = {},
+                onPreviousDay = {
+                    val index = state.days.indexOfFirst { it.date == state.selectedDate }
+                    state = state.copy(selectedDate = state.days[index - 1].date)
+                },
+                onNextDay = {
+                    val index = state.days.indexOfFirst { it.date == state.selectedDate }
+                    state = state.copy(selectedDate = state.days[index + 1].date)
+                },
+                onSelectDate = { state = state.copy(selectedDate = it) },
+                onOpenSettings = {},
+                onToggleExpanded = {},
+                onProcessedChange = { _, _ -> },
+                onOpenProject = {},
+                onOpenSourceDay = {},
+            )
+        }
+
+        compose.onNodeWithContentDescription("Previous day").assertIsDisplayed()
+        compose.onNodeWithContentDescription("Next day").assertIsDisplayed()
+        val beforeSwipe = state.selectedDate
+        compose.onNodeWithTag(REVIEW_DATES_CONTENT_TAG).performTouchInput { swipeLeft() }
+        compose.runOnIdle { assertThat(state.selectedDate).isEqualTo(beforeSwipe?.plusDays(1)) }
+
+        val oldest = days.first().date
+        compose.onNodeWithTag(REVIEW_DATE_BROWSER_TAG)
+            .performScrollToNode(hasContentDescription("Open date $oldest"))
+        compose.onNodeWithContentDescription("Open date $oldest").performClick()
+        compose.runOnIdle { assertThat(state.selectedDate).isEqualTo(oldest) }
+    }
+
+    @Test
     fun settingsExposeExactControlsAndRequirePlainLanguagePrivacyDisclosure() {
         var folderCalls = 0
         var permissionCalls = 0
@@ -222,6 +298,7 @@ class ReviewScreenTest {
                 folderLabel = "SideNote",
                 microphoneGranted = false,
                 notificationsGranted = false,
+                message = "That setting could not be saved. Please try again.",
                 onBack = {},
                 onChooseFolder = { folderCalls += 1 },
                 onVoiceOnAtLaunchChange = {},
@@ -231,6 +308,8 @@ class ReviewScreenTest {
         }
 
         compose.onNodeWithText("Notes folder").assertIsDisplayed()
+        compose.onNodeWithText("That setting could not be saved. Please try again.")
+            .assertIsDisplayed()
         compose.onNodeWithText("Change folder").performClick()
         compose.onNodeWithText("Voice on at launch").assertIsDisplayed()
         compose.onNodeWithText("Allow online voice recognition").performClick()
@@ -269,9 +348,11 @@ class ReviewScreenTest {
             false,
             0,
         )
+        var effectiveFontScale: Float? = null
         setContent {
             val density = LocalDensity.current
             CompositionLocalProvider(LocalDensity provides Density(density.density, 2f)) {
+                effectiveFontScale = LocalDensity.current.fontScale
                 ReviewScreen(
                     state = ReviewState(
                         days = listOf(ReviewDay(mixed.entry.date, listOf(mixed))),
@@ -300,6 +381,7 @@ class ReviewScreenTest {
         ).forEach { child -> assertContained(child, root) }
         compose.onNodeWithText("Call דנה about @Home renovation", useUnmergedTree = true)
             .assertIsDisplayed()
+        compose.runOnIdle { assertThat(effectiveFontScale).isEqualTo(2f) }
     }
 
     private fun entry(

@@ -76,6 +76,18 @@ class AccessibilityAndBidiTest {
         compose.onNodeWithText("Could not save. Your draft is kept; restore folder access in Settings and try again.")
             .assertIsDisplayed()
             .assert(SemanticsMatcher.expectValue(SemanticsProperties.LiveRegion, LiveRegionMode.Polite))
+        compose.runOnIdle { state = state.copy(recoveryWriteFailed = true) }
+        compose.onNodeWithText(
+            "Could not save to your notes folder, and temporary recovery is unavailable. " +
+                "Keep this screen open while you restore folder access and retry.",
+        ).assertIsDisplayed()
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.LiveRegion, LiveRegionMode.Polite))
+        compose.runOnIdle { state = state.copy(status = CaptureStatus.SaveUncertain) }
+        compose.onNodeWithText(
+            "Android could not confirm the folder update, and temporary recovery is unavailable. " +
+                "Keep this screen open and inspect the Markdown file before retrying.",
+        ).assertIsDisplayed()
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.LiveRegion, LiveRegionMode.Polite))
         compose.runOnIdle { state = state.copy(status = CaptureStatus.SpeechUnavailable) }
         compose.onNodeWithText("Voice is unavailable. You can keep typing.")
             .assertIsDisplayed()
@@ -138,7 +150,11 @@ class AccessibilityAndBidiTest {
         editor.assert(SemanticsMatcher.expectValue(SemanticsProperties.TextSelectionRange, TextRange(1, 6)))
         assertThat(coordinator.state.value.draft.composition).isEqualTo(TextRange(1, 13))
         editor.performTextInputSelection(TextRange(text.length))
+        compose.waitUntil(timeoutMillis = 5_000) {
+            coordinator.state.value.draft.selection == TextRange(text.length)
+        }
         editor.performTextInput("!")
+        compose.waitForIdle()
         assertThat(coordinator.state.value.draft.text).isEqualTo("@AlphaProject @BetaProject @GammaProject @בית!")
         assertThat(coordinator.state.value.draft.selection).isEqualTo(TextRange(text.length + 1))
         compose.onNodeWithText("Discard").performScrollTo().assertIsDisplayed()
@@ -180,6 +196,9 @@ class AccessibilityAndBidiTest {
             activity.resources.updateConfiguration(config, activity.resources.displayMetrics)
         }
         scenario!!.recreate()
+        scenario!!.onActivity { activity ->
+            assertThat(activity.resources.configuration.fontScale).isEqualTo(2f)
+        }
         try {
             compose.onNodeWithTag("$REVIEW_TIMESTAMP_TAG.0")
                 .assertTextEquals("\u206618:26\u2069")

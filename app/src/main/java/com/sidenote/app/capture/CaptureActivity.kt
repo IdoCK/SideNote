@@ -50,6 +50,7 @@ class CaptureActivity : ComponentActivity() {
     private var completionJob: Job? = null
     private var pendingCompletionSignal: CompletionSignal? = null
     private var initialSettings: AppSettings? = null
+    private var reviewLaunch = false
 
     private val externalSetupLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult(),
@@ -62,6 +63,8 @@ class CaptureActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        reviewLaunch = savedInstanceState?.getBoolean(STATE_REVIEW_LAUNCH, false) == true ||
+            intent?.action == ACTION_REVIEW
         pendingCompletionSignal = savedInstanceState?.getString(STATE_PENDING_COMPLETION)?.let {
             name -> CompletionSignal.entries.firstOrNull { signal -> signal.name == name }
         }
@@ -72,7 +75,6 @@ class CaptureActivity : ComponentActivity() {
             navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
         )
         container = (application as SideNoteApplication).container
-        dependencies = container.captureDependencies()
         lockState = container.lockState()
         lockState.refresh()
         lifecycleScope.launch {
@@ -86,14 +88,24 @@ class CaptureActivity : ComponentActivity() {
         setContent {
             SideNoteTheme {
                 val locked by lockState.locked.collectAsState()
+                LaunchedEffect(reviewLaunch, locked) {
+                    if (reviewLaunch) {
+                        if (locked) requestDismissalOnce() else routeToReview()
+                    }
+                }
                 LaunchedEffect(onboardingComplete.value, locked) {
-                    if (onboardingComplete.value == false) {
+                    if (!reviewLaunch && onboardingComplete.value == false) {
                         if (locked) requestDismissalOnce() else routeToOnboarding()
                     }
                 }
                 val current = viewModel
-                if (captureReady.value && current != null) {
+                if (reviewLaunch) {
+                    UnlockGate(onRetry = if (locked) ::retryDismissal else null)
+                } else if (captureReady.value && current != null) {
                     val state by current.state.collectAsState()
+                    LaunchedEffect(locked) {
+                        current.refreshProjectSuggestions(unlocked = !locked)
+                    }
                     CompositionLocalProvider(
                         LocalReducedMotion provides !ValueAnimator.areAnimatorsEnabled(),
                     ) {
@@ -102,6 +114,7 @@ class CaptureActivity : ComponentActivity() {
                             onTextChanged = current::onUserEdit,
                             onVoiceToggle = current::onVoiceToggle,
                             onDiscard = current::discard,
+                            onRetryRecovery = current::retryRecovery,
                         )
                     }
                 } else {
@@ -116,6 +129,9 @@ class CaptureActivity : ComponentActivity() {
             }
         }
 
+        if (reviewLaunch) return
+
+        dependencies = container.captureDependencies()
         completionJob = lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
                 dependencies.completionSignals.collect(::onCompletionSignal)
@@ -138,12 +154,20 @@ class CaptureActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        onCompletionSignal(CompletionSignal.RepeatedLaunch)
+        if (intent.action == ACTION_REVIEW) {
+            reviewLaunch = true
+            pendingCompletionSignal = null
+            lockState.refresh()
+            if (lockState.locked.value) requestDismissalOnce() else routeToReview()
+        } else if (!reviewLaunch) {
+            onCompletionSignal(CompletionSignal.RepeatedLaunch)
+        }
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
         initialSettings?.let { settings -> outState.putSettings(settings) }
         outState.putString(STATE_PENDING_COMPLETION, pendingCompletionSignal?.name)
+        outState.putBoolean(STATE_REVIEW_LAUNCH, reviewLaunch)
         super.onSaveInstanceState(outState)
     }
 
@@ -167,7 +191,10 @@ class CaptureActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        if (::lockState.isInitialized) lockState.refresh()
+        if (::lockState.isInitialized) {
+            lockState.refresh()
+            viewModel?.refreshProjectSuggestions(unlocked = !lockState.locked.value)
+        }
     }
 
     override fun onStop() {
@@ -262,6 +289,18 @@ class CaptureActivity : ComponentActivity() {
         finish()
     }
 
+    private fun routeToReview() {
+        if (routedToOnboarding || lockState.locked.value) return
+        routedToOnboarding = true
+        setShowWhenLocked(false)
+        startActivity(
+            Intent(this, MainActivity::class.java).addFlags(
+                Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP,
+            ),
+        )
+        finish()
+    }
+
     private fun Bundle.putSettings(settings: AppSettings) {
         putBoolean(STATE_HAS_SETTINGS, true)
         putString(STATE_TREE_URI, settings.treeUri?.toString())
@@ -283,7 +322,9 @@ class CaptureActivity : ComponentActivity() {
     }
 
     companion object {
+        const val ACTION_REVIEW = "com.sidenote.app.REVIEW"
         private const val STATE_PENDING_COMPLETION = "capture_pending_completion"
+        private const val STATE_REVIEW_LAUNCH = "capture_review_launch"
         private const val STATE_HAS_SETTINGS = "capture_has_settings"
         private const val STATE_TREE_URI = "capture_tree_uri"
         private const val STATE_VOICE_ON_AT_LAUNCH = "capture_voice_on_at_launch"

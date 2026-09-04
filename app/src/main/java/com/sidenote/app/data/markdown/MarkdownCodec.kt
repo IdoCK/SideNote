@@ -41,8 +41,29 @@ class MarkdownCodec {
         val lines = splitLines(text)
         val entries = mutableListOf<MarkdownEntry>()
         var lineIndex = 0
+        var fence: String? = null
+        var inComment = false
         while (lineIndex < lines.size) {
             val line = lines[lineIndex]
+            val fenceMarker = Regex("^ {0,3}(`{3,}|~{3,})(.*)$").matchEntire(line.content)
+            val openedFence = fence
+            if (openedFence != null) {
+                if (fenceMarker != null && fenceMarker.groupValues[1].first() == openedFence.first() &&
+                    fenceMarker.groupValues[1].length >= openedFence.length && fenceMarker.groupValues[2].isBlank()
+                ) fence = null
+                lineIndex++
+                continue
+            }
+            if (inComment || line.content.contains("<!--")) {
+                inComment = !line.content.contains("-->")
+                lineIndex++
+                continue
+            }
+            if (fenceMarker != null) {
+                fence = fenceMarker.groupValues[1]
+                lineIndex++
+                continue
+            }
             val match = taskPattern.matchEntire(line.content)
             val time = match?.groupValues?.get(2)?.let(::parseTimeOrNull)
             if (match == null || time == null) {
@@ -84,32 +105,12 @@ class MarkdownCodec {
     }
 
     fun rewriteProcessed(text: String, source: EntrySource, processed: Boolean): RewriteResult {
-        val lines = splitLines(text)
-        val sourceLineIndex = lines.indexOfFirst { it.start == source.lineStart }
-        if (sourceLineIndex < 0) return RewriteResult.Conflict
-        val firstLine = lines[sourceLineIndex]
-        val firstMatch = taskPattern.matchEntire(firstLine.content) ?: return RewriteResult.Conflict
-        if (parseTimeOrNull(firstMatch.groupValues[2]) == null) return RewriteResult.Conflict
-
-        var lastTaskLine = sourceLineIndex
-        while (
-            lastTaskLine + 1 < lines.size &&
-            lines[lastTaskLine].separator.isNotEmpty() &&
-            lines[lastTaskLine + 1].content.isIndented()
-        ) {
-            lastTaskLine += 1
+        // The same confidence/context rules govern discovery and edits. A forged source
+        // location must never make a fenced example editable.
+        if (parse(LocalDate.of(2000, 1, 1), text).entries.none { it.source == source }) {
+            return RewriteResult.Conflict
         }
-        val rawEnd = lines[lastTaskLine].start + lines[lastTaskLine].content.length
-        val currentRawTask = text.substring(firstLine.start, rawEnd)
-        if (currentRawTask != source.rawTask) return RewriteResult.Conflict
-
-        val currentOrdinal = lines.take(sourceLineIndex).count { line ->
-            val match = taskPattern.matchEntire(line.content)
-            match != null && parseTimeOrNull(match.groupValues[2]) != null
-        }
-        if (currentOrdinal != source.ordinal) return RewriteResult.Conflict
-
-        val checkboxIndex = firstLine.start + CHECKBOX_MARK_OFFSET
+        val checkboxIndex = source.lineStart + CHECKBOX_MARK_OFFSET
         val replacement = if (processed) 'x' else ' '
         return RewriteResult.Updated(
             text.substring(0, checkboxIndex) + replacement + text.substring(checkboxIndex + 1),

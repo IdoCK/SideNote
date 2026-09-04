@@ -246,6 +246,7 @@ class SideNoteMainViewModel(
         try {
             withContext(dependencies.ioDispatcher) { write() }
             onSuccess()
+            mutableState.value = mutableState.value.copy(message = null)
         } catch (error: CancellationException) {
             throw error
         } catch (_: Exception) {
@@ -309,6 +310,7 @@ fun SideNoteNavHost(
     onShowProjects: () -> Unit,
     onPreviousDay: () -> Unit,
     onNextDay: () -> Unit,
+    onSelectDate: (java.time.LocalDate) -> Unit,
     onToggleExpanded: (ReviewEntry) -> Unit,
     onProcessedChange: (ReviewEntry, Boolean) -> Unit,
     onOpenProject: (String) -> Unit,
@@ -348,6 +350,7 @@ fun SideNoteNavHost(
             folderLabel = settings.treeUri?.folderLabel().orEmpty(),
             microphoneGranted = permissions.microphoneGranted,
             notificationsGranted = permissions.notificationsGranted,
+            message = mainState.message,
             onBack = { destination = ProtectedDestination.Review },
             onChooseFolder = onChooseFolder,
             onVoiceOnAtLaunchChange = onVoiceOnAtLaunchChange,
@@ -361,6 +364,7 @@ fun SideNoteNavHost(
             onShowProjects = onShowProjects,
             onPreviousDay = onPreviousDay,
             onNextDay = onNextDay,
+            onSelectDate = onSelectDate,
             onOpenSettings = { destination = ProtectedDestination.Settings },
             onToggleExpanded = onToggleExpanded,
             onProcessedChange = onProcessedChange,

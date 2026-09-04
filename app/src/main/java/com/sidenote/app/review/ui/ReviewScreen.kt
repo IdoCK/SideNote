@@ -2,6 +2,7 @@ package com.sidenote.app.review.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -15,7 +16,10 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.sizeIn
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.HorizontalDivider
@@ -28,6 +32,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
@@ -56,6 +62,8 @@ const val REVIEW_ROOT_TAG = "review-root"
 const val REVIEW_ENTRY_TAG = "review-entry"
 const val REVIEW_CHECKBOX_TAG = "review-checkbox"
 const val REVIEW_TIMESTAMP_TAG = "review-timestamp"
+const val REVIEW_DATES_CONTENT_TAG = "review-dates-content"
+const val REVIEW_DATE_BROWSER_TAG = "review-date-browser"
 
 internal val ReviewBackground = Color(0xFF111111)
 internal val ReviewSurface = Color(0xFF1D1D1D)
@@ -74,6 +82,7 @@ fun ReviewScreen(
     onProcessedChange: (ReviewEntry, Boolean) -> Unit,
     onOpenProject: (String) -> Unit,
     onOpenSourceDay: (ProjectEntry) -> Unit,
+    onSelectDate: (LocalDate) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     Surface(
@@ -102,6 +111,7 @@ fun ReviewScreen(
                     state = state,
                     onPreviousDay = onPreviousDay,
                     onNextDay = onNextDay,
+                    onSelectDate = onSelectDate,
                     onToggleExpanded = onToggleExpanded,
                     onProcessedChange = onProcessedChange,
                 )
@@ -167,10 +177,29 @@ private fun DatesContent(
     state: ReviewState,
     onPreviousDay: () -> Unit,
     onNextDay: () -> Unit,
+    onSelectDate: (LocalDate) -> Unit,
     onToggleExpanded: (ReviewEntry) -> Unit,
     onProcessedChange: (ReviewEntry, Boolean) -> Unit,
 ) {
-    Column(modifier = Modifier.fillMaxSize()) {
+    val swipeThreshold = with(LocalDensity.current) { 64.dp.toPx() }
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .testTag(REVIEW_DATES_CONTENT_TAG)
+            .pointerInput(state.selectedDate, state.canGoPrevious, state.canGoNext) {
+                var horizontalTravel = 0f
+                detectHorizontalDragGestures(
+                    onDragStart = { horizontalTravel = 0f },
+                    onHorizontalDrag = { _, dragAmount -> horizontalTravel += dragAmount },
+                    onDragEnd = {
+                        when {
+                            horizontalTravel <= -swipeThreshold && state.canGoNext -> onNextDay()
+                            horizontalTravel >= swipeThreshold && state.canGoPrevious -> onPreviousDay()
+                        }
+                    },
+                )
+            },
+    ) {
         Text(
             text = state.selectedDate?.displayDate().orEmpty(),
             style = MaterialTheme.typography.headlineMedium,
@@ -196,23 +225,55 @@ private fun DatesContent(
                 onClick = onNextDay,
             )
         }
-        val entries = state.selectedDay?.entries.orEmpty()
-        if (entries.isEmpty()) {
-            Text(
-                text = "No SideNote entries for this day.",
-                color = ReviewSubdued,
-                modifier = Modifier.padding(20.dp),
-            )
-        } else {
-            LazyColumn(
-                modifier = Modifier.fillMaxSize(),
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(
-                    start = 12.dp,
-                    top = 8.dp,
-                    end = 12.dp,
-                    bottom = 24.dp,
-                ),
-            ) {
+        Text(
+            text = "Browse dates",
+            color = ReviewSubdued,
+            style = MaterialTheme.typography.labelLarge,
+            modifier = Modifier.padding(start = 20.dp, top = 8.dp),
+        )
+        LazyRow(
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag(REVIEW_DATE_BROWSER_TAG),
+            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            items(state.days, key = { day -> day.date.toString() }) { day ->
+                val selected = day.date == state.selectedDate
+                TextButton(
+                    onClick = { onSelectDate(day.date) },
+                    modifier = Modifier
+                        .height(48.dp)
+                        .semantics { contentDescription = "Open date ${day.date}" },
+                ) {
+                    Text(
+                        text = day.date.shortDisplayDate(),
+                        color = if (selected) ReviewText else ReviewSubdued,
+                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                    )
+                }
+            }
+        }
+        val selectedDay = state.selectedDay
+        val entries = selectedDay?.entries.orEmpty()
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = androidx.compose.foundation.layout.PaddingValues(
+                start = 12.dp,
+                top = 8.dp,
+                end = 12.dp,
+                bottom = 24.dp,
+            ),
+        ) {
+            if (entries.isEmpty()) {
+                item {
+                    Text(
+                        text = "No SideNote entries for this day.",
+                        color = ReviewSubdued,
+                        modifier = Modifier.padding(8.dp),
+                    )
+                }
+            } else {
                 itemsIndexed(entries, key = { _, item -> item.id.toString() }) { index, entry ->
                     ReviewEntryRow(
                         entry = entry,
@@ -224,6 +285,34 @@ private fun DatesContent(
                         onOpenSourceDay = null,
                     )
                 }
+            }
+            selectedDay?.sourceText?.takeIf(String::isNotBlank)?.let { source ->
+                item(key = "source-${selectedDay.date}") {
+                    ReadOnlyMarkdownSource(source)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ReadOnlyMarkdownSource(source: String) {
+    Column(
+        modifier = Modifier.fillMaxWidth().padding(top = 16.dp, start = 8.dp, end = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text(
+            text = "Original Markdown · read only",
+            color = ReviewSubdued,
+            style = MaterialTheme.typography.titleMedium,
+        )
+        Surface(color = ReviewSurface, shape = MaterialTheme.shapes.small) {
+            SelectionContainer {
+                Text(
+                    text = source,
+                    color = ReviewText,
+                    modifier = Modifier.fillMaxWidth().padding(12.dp),
+                )
             }
         }
     }
@@ -450,6 +539,9 @@ private fun List<*>.entryCountLabel(): String =
 private fun LocalDate.displayDate(): String =
     "\u2066${format(DateTimeFormatter.ofPattern("EEEE, MMMM d, uuuu", Locale.getDefault()))}\u2069"
 
+private fun LocalDate.shortDisplayDate(): String =
+    format(DateTimeFormatter.ofPattern("MMM d", Locale.getDefault()))
+
 private fun java.time.LocalTime.isolatedTime(): String =
     "\u2066${format(DateTimeFormatter.ofPattern("HH:mm"))}\u2069"
 
@@ -460,6 +552,8 @@ private fun com.sidenote.app.review.ReviewMessage.everydayText(): String = when 
         "SideNote no longer has access to the notes folder. Open Settings to choose it again."
     com.sidenote.app.review.ReviewMessage.CouldNotUpdate ->
         "That checkbox could not be updated. Your Markdown file was left unchanged."
+    com.sidenote.app.review.ReviewMessage.UpdateUncertain ->
+        "Android could not confirm that checkbox update. Check the Markdown file before trying again."
     com.sidenote.app.review.ReviewMessage.CouldNotLoad ->
         "The notes folder could not be read. Try again from Settings."
 }

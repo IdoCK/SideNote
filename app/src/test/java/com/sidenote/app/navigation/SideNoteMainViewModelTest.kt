@@ -282,6 +282,45 @@ class SideNoteMainViewModelTest {
             assertThat(staleEngine.destroyCalls).isEqualTo(1)
         }
 
+    @Test
+    fun failedFolderRepairAndConsentWritesStayVisibleUntilASuccessfulRetry() =
+        runTest(dispatcher) {
+            val settings = RecordingSettingsRepository(
+                AppSettings(
+                    treeUri = Uri.parse("content://notes/tree/Old"),
+                    onboardingComplete = true,
+                ),
+            )
+            val viewModel = viewModel(settings, RecordingSpeechEngine())
+            advanceUntilIdle()
+
+            settings.failWrites = true
+            val repaired = Uri.parse("content://notes/tree/Repaired")
+            viewModel.onFolderSelected(repaired)
+            advanceUntilIdle()
+            assertThat(viewModel.state.value.message)
+                .isEqualTo("That setting could not be saved. Please try again.")
+            assertThat(settings.value.treeUri).isNotEqualTo(repaired)
+
+            settings.failWrites = false
+            viewModel.onFolderSelected(repaired)
+            advanceUntilIdle()
+            assertThat(settings.value.treeUri).isEqualTo(repaired)
+            assertThat(viewModel.state.value.message).isNull()
+
+            settings.failWrites = true
+            viewModel.setOnlineFallbackAllowed(true)
+            advanceUntilIdle()
+            assertThat(viewModel.state.value.message)
+                .isEqualTo("That setting could not be saved. Please try again.")
+
+            settings.failWrites = false
+            viewModel.setOnlineFallbackAllowed(true)
+            advanceUntilIdle()
+            assertThat(settings.value.onlineFallbackAllowed).isTrue()
+            assertThat(viewModel.state.value.message).isNull()
+        }
+
     private fun viewModel(
         settings: RecordingSettingsRepository,
         speech: RecordingSpeechEngine,
@@ -301,19 +340,23 @@ private class RecordingSettingsRepository(
     private val mutableSettings = MutableStateFlow(initial)
     val value: AppSettings get() = mutableSettings.value
     val configurationWrites = mutableListOf<String>()
+    var failWrites = false
     override val settings: Flow<AppSettings> = mutableSettings
 
     override suspend fun setTreeUri(treeUri: Uri?) {
+        if (failWrites) throw java.io.IOException("settings unavailable")
         configurationWrites += "folder:$treeUri"
         mutableSettings.value = value.copy(treeUri = treeUri)
     }
 
     override suspend fun setVoiceOnAtLaunch(enabled: Boolean) {
+        if (failWrites) throw java.io.IOException("settings unavailable")
         configurationWrites += "voice:$enabled"
         mutableSettings.value = value.copy(voiceOnAtLaunch = enabled)
     }
 
     override suspend fun acceptVoiceDisclosureAndSetFallback(allowed: Boolean) {
+        if (failWrites) throw java.io.IOException("settings unavailable")
         configurationWrites += "fallback:$allowed"
         mutableSettings.value = value.copy(
             voiceDisclosureAccepted = true,
@@ -322,6 +365,7 @@ private class RecordingSettingsRepository(
     }
 
     override suspend fun setOnboardingComplete(complete: Boolean) {
+        if (failWrites) throw java.io.IOException("settings unavailable")
         configurationWrites += "onboarding:$complete"
         mutableSettings.value = value.copy(onboardingComplete = complete)
     }

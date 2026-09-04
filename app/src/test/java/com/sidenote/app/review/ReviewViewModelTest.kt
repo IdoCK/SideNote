@@ -15,11 +15,13 @@ import com.sidenote.app.notification.NotificationRefresher
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import org.junit.After
@@ -66,6 +68,21 @@ class ReviewViewModelTest {
             .inOrder()
         assertThat(project.entries.all { it.entry.source.rawTask.isNotBlank() }).isTrue()
     }
+
+    @Test
+    fun proseOnlyAndMalformedDailyFilesRetainTheirOriginalReadOnlySource() =
+        runTest(mainDispatcher) {
+            val raw = "# 2026-08-28\n\nOrdinary prose\n- [ ] malformed task\n"
+            val parsed = MarkdownCodec().parse(LocalDate.parse("2026-08-28"), raw)
+            val viewModel = ReviewViewModel(FakeDocumentRepository(listOf(parsed)), mainDispatcher)
+
+            advanceUntilIdle()
+
+            val day = viewModel.state.value.days.single()
+            assertThat(day.entries).isEmpty()
+            assertThat(day.sourceText).isEqualTo(raw)
+            assertThat(viewModel.state.value.selectedDate).isEqualTo(LocalDate.parse("2026-08-28"))
+        }
 
     @Test
     fun projectDisplayUsesFirstChronologicalSpellingWhileSameDayEntriesAreNewestFirst() =
@@ -310,6 +327,59 @@ class ReviewViewModelTest {
         }
 
     @Test
+    fun oneCoalescedReentryRefreshLoadsExternalAddEditAndDelete() = runTest(mainDispatcher) {
+        val repository = FakeDocumentRepository(
+            listOf(
+                day("2026-08-26", "- [ ] **08:00** delete me"),
+                day("2026-08-27", "- [ ] **09:00** edit me"),
+            ),
+        )
+        val viewModel = ReviewViewModel(repository, mainDispatcher)
+        advanceUntilIdle()
+        repository.days = listOf(
+            day("2026-08-27", "- [ ] **09:00** edited outside"),
+            day("2026-08-28", "- [ ] **10:00** added outside"),
+        )
+
+        repeat(3) { viewModel.refresh() }
+        advanceUntilIdle()
+
+        assertThat(repository.daysCalls).isEqualTo(2)
+        assertThat(viewModel.state.value.days.map(ReviewDay::date))
+            .containsExactly(LocalDate.parse("2026-08-27"), LocalDate.parse("2026-08-28"))
+            .inOrder()
+        assertThat(viewModel.state.value.days.flatMap(ReviewDay::entries).map { it.entry.text })
+            .containsExactly("edited outside", "added outside")
+            .inOrder()
+    }
+
+    @Test
+    fun reentryRefreshWaitsForAnOverlappingCheckboxWriteAndLoadsItsResultOnceSafe() =
+        runTest(mainDispatcher) {
+            val repository = FakeDocumentRepository(
+                listOf(day("2026-08-27", "- [ ] **08:00** pending")),
+            )
+            val viewModel = ReviewViewModel(repository, mainDispatcher)
+            advanceUntilIdle()
+            val suspension = repository.suspendNextUpdate()
+
+            viewModel.setProcessed(viewModel.state.value.days.single().entries.single(), true)
+            runCurrent()
+            assertThat(suspension.started.isCompleted).isTrue()
+            viewModel.refresh()
+            runCurrent()
+            assertThat(repository.daysCalls).isEqualTo(1)
+
+            suspension.release.complete(Unit)
+            advanceUntilIdle()
+
+            assertThat(repository.updates).hasSize(1)
+            assertThat(viewModel.state.value.days.single().entries.single().entry.processed).isTrue()
+            assertThat(viewModel.state.value.message).isNull()
+            assertThat(repository.daysCalls).isEqualTo(3)
+        }
+
+    @Test
     fun checkboxConflictReloadsInsteadOfOverwriting() = runTest(mainDispatcher) {
         val sourceDay = day("2026-08-27", "- [ ] **08:00** pending")
         val repository = FakeDocumentRepository(listOf(sourceDay)).apply {
@@ -375,6 +445,22 @@ class ReviewViewModelTest {
         assertThat(repository.daysCalls).isEqualTo(1)
         assertThat(viewModel.state.value.days.single().entries.single().entry.processed).isFalse()
         assertThat(viewModel.state.value.message).isEqualTo(ReviewMessage.FolderAccessLost)
+    }
+
+    @Test
+    fun uncertainCheckboxWriteDoesNotPromiseThatMarkdownWasUnchanged() = runTest(mainDispatcher) {
+        val sourceDay = day("2026-08-27", "- [ ] **08:00** pending")
+        val repository = FakeDocumentRepository(listOf(sourceDay)).apply {
+            nextUpdate = UpdateResult.Uncertain(RepositoryError.WriteFailed)
+        }
+        val viewModel = ReviewViewModel(repository, mainDispatcher)
+        advanceUntilIdle()
+
+        viewModel.setProcessed(viewModel.state.value.days.single().entries.single(), true)
+        advanceUntilIdle()
+
+        assertThat(viewModel.state.value.days.single().entries.single().entry.processed).isFalse()
+        assertThat(viewModel.state.value.message).isEqualTo(ReviewMessage.UpdateUncertain)
     }
 
     @Test
@@ -517,6 +603,12 @@ private class FakeDocumentRepository(
     var nextUpdate: UpdateResult = UpdateResult.Success
     val updates = mutableListOf<UpdateCall>()
     private val codec = MarkdownCodec()
+    private var updateSuspension: UpdateSuspension? = null
+
+    fun suspendNextUpdate(): UpdateSuspension = UpdateSuspension(
+        started = CompletableDeferred(),
+        release = CompletableDeferred(),
+    ).also { updateSuspension = it }
 
     override suspend fun append(
         text: String,
@@ -539,6 +631,11 @@ private class FakeDocumentRepository(
         processed: Boolean,
     ): UpdateResult {
         updates += UpdateCall(source, fileName, expectedRaw, processed)
+        updateSuspension?.let { suspension ->
+            suspension.started.complete(Unit)
+            suspension.release.await()
+            updateSuspension = null
+        }
         val result = nextUpdate.also { nextUpdate = UpdateResult.Success }
         if (result == UpdateResult.Success) {
             val exactFile = days.singleOrNull { day ->
@@ -562,6 +659,11 @@ private class FakeDocumentRepository(
     override suspend fun uncheckedCount(): Int =
         days.sumOf { day -> day.entries.count { entry -> !entry.processed } }
 }
+
+private data class UpdateSuspension(
+    val started: CompletableDeferred<Unit>,
+    val release: CompletableDeferred<Unit>,
+)
 
 private class RecordingNotificationRefresher : NotificationRefresher {
     var refreshCalls = 0

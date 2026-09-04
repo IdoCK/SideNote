@@ -21,6 +21,58 @@ import org.junit.Test
 @OptIn(ExperimentalCoroutinesApi::class)
 class AndroidSpeechEnginePolicyTest {
     @Test
+    fun installedOnlyLanguagesAreReadyButDownloadableOnlyAreNot() = runTest {
+        val installed = AndroidSpeechEngine(false, FakeRecognitionSessionFactory(
+            localSupport = RecognitionSupportSnapshot(installedOnDeviceLanguages = setOf("en-US", "he-IL")),
+        ))
+        val downloadable = AndroidSpeechEngine(false, FakeRecognitionSessionFactory(
+            localSupport = RecognitionSupportSnapshot(supportedOnDeviceLanguages = setOf("en-US", "he-IL")),
+        ))
+        assertThat(installed.support()).isEqualTo(SpeechAvailability.Available)
+        assertThat(downloadable.support()).isEqualTo(SpeechAvailability.TypedOnly)
+    }
+
+    @Test
+    fun localUnsupportedLanguageCanUseTheConsentedOnlinePath() {
+        assertThat(SpeechAttemptPolicy(true).nextAfter(Attempt.Local, SpeechFailure.LanguageNotSupported))
+            .isEqualTo(Attempt.Online)
+        assertThat(SpeechAttemptPolicy(false).nextAfter(Attempt.Local, SpeechFailure.LanguageNotSupported)).isNull()
+    }
+
+    @Test
+    fun gracefulFinishWaitsForTerminalResultAndDoesNotDestroyEarly() = runTest {
+        val factory = FakeRecognitionSessionFactory()
+        val engine = AndroidSpeechEngine(false, factory)
+        val listener = RecordingSpeechListener()
+        engine.start(listener)
+        val session = factory.created.single()
+        val finish = async { engine.finish() }
+        runCurrent()
+        assertThat(finish.isCompleted).isFalse()
+        assertThat(session.destroyCount).isEqualTo(0)
+        session.emitFinal("correct final")
+        finish.await()
+        assertThat(listener.finals).containsExactly("correct final")
+        assertThat(session.destroyCount).isEqualTo(1)
+    }
+
+    @Test
+    fun gracefulFinishTimesOutAndRejectsLateFinalWithoutOnlineRestart() = runTest {
+        val factory = FakeRecognitionSessionFactory()
+        val engine = AndroidSpeechEngine(true, factory)
+        val listener = RecordingSpeechListener()
+        engine.start(listener)
+        val session = factory.created.single()
+        val startedAt = testScheduler.currentTime
+        engine.finish()
+        assertThat(testScheduler.currentTime - startedAt).isEqualTo(1500L)
+        session.emitFinal("too late")
+        assertThat(listener.finals).isEmpty()
+        assertThat(factory.created).hasSize(1)
+        assertThat(session.destroyCount).isEqualTo(1)
+    }
+
+    @Test
     fun localRecoverableFailureRetriesOnlineOnceWhenAllowed() = runTest {
         val policy = SpeechAttemptPolicy(onlineFallbackAllowed = true)
 
@@ -247,7 +299,7 @@ class AndroidSpeechEnginePolicyTest {
         local.emitRms(10f)
         local.emitFailure(SpeechRecognizer.ERROR_NETWORK)
 
-        assertThat(local.stopCount).isEqualTo(1)
+        assertThat(local.cancelCount).isEqualTo(1)
         assertThat(local.destroyCount).isEqualTo(1)
         assertThat(listener.partials).isEmpty()
         assertThat(listener.rmsValues).isEmpty()
@@ -364,7 +416,6 @@ class AndroidSpeechEnginePolicyTest {
     @Test
     fun supportQueriesBothLanguagesAndCleansTheProbeSession() = runTest {
         val localSupport = RecognitionSupportSnapshot(
-            supportedOnDeviceLanguages = setOf("en-US", "he-IL"),
             installedOnDeviceLanguages = setOf("en-US", "he-IL"),
         )
         val factory = FakeRecognitionSessionFactory(localSupport = localSupport)
@@ -375,7 +426,7 @@ class AndroidSpeechEnginePolicyTest {
 
         assertThat(engine.support()).isEqualTo(SpeechAvailability.Available)
 
-        val probe = factory.created.single()
+        val probe = factory.created.first()
         assertThat(probe.supportRequests.map { it.languageTag })
             .containsExactly("en-US", "he-IL")
             .inOrder()

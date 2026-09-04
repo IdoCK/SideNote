@@ -32,12 +32,15 @@ class ReviewViewModel(
     private val mutableState = MutableStateFlow(ReviewState())
     val state: StateFlow<ReviewState> = mutableState.asStateFlow()
     private val repositoryMutex = Mutex()
+    private val refreshLock = Any()
     private val processedActionsLock = Any()
     private val pendingProcessedActions = linkedMapOf<ProcessedTarget, Boolean>()
     private var processedActionsActive = false
     private var documentSourceInitialized = false
     private var documentSource: DocumentSource? = null
     private var initialRefreshActive = true
+    private var refreshActive = false
+    private var refreshQueued = false
     private var selectMostRecentUnprocessedOnNextLoad = false
 
     init {
@@ -58,13 +61,41 @@ class ReviewViewModel(
     }
 
     private fun launchRefresh(initial: Boolean) {
+        val shouldLaunch = synchronized(refreshLock) {
+            if (refreshActive) {
+                refreshQueued = true
+                false
+            } else {
+                refreshActive = true
+                true
+            }
+        }
+        if (!shouldLaunch) return
         viewModelScope.launch {
             try {
-                repositoryMutex.withLock {
-                    loadDays(messageAfterLoad = null)
-                }
+                var firstPass = true
+                do {
+                    synchronized(refreshLock) { refreshQueued = false }
+                    repositoryMutex.withLock {
+                        loadDays(messageAfterLoad = null)
+                    }
+                    if (initial && firstPass) initialRefreshActive = false
+                    firstPass = false
+                    val repeat = synchronized(refreshLock) {
+                        if (refreshQueued) {
+                            true
+                        } else {
+                            refreshActive = false
+                            false
+                        }
+                    }
+                } while (repeat)
             } finally {
                 if (initial) initialRefreshActive = false
+                synchronized(refreshLock) {
+                    refreshActive = false
+                    refreshQueued = false
+                }
             }
         }
     }
@@ -237,6 +268,12 @@ class ReviewViewModel(
                 loadDays(messageAfterLoad = ReviewMessage.FileChanged)
                 false
             }
+            is UpdateResult.Uncertain -> {
+                mutableState.value = mutableState.value.copy(
+                    message = ReviewMessage.UpdateUncertain,
+                )
+                false
+            }
             is UpdateResult.Failure -> {
                 mutableState.value = mutableState.value.copy(
                     message = result.error.toReviewMessage(),
@@ -261,6 +298,7 @@ class ReviewViewModel(
                             expectedRaw = day.raw,
                         )
                     },
+                    sourceText = day.raw,
                 )
             }
             val allEntriesChronological = days

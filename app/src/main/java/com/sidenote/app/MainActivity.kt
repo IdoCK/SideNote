@@ -47,6 +47,8 @@ class MainActivity : ComponentActivity() {
     private val setupUnavailable = mutableStateOf(false)
     private var dismissRequested = false
     private var pendingMostRecentUnprocessed = false
+    private var hasResumed = false
+    private var lastObservedLocked: Boolean? = null
 
     private val folderPicker = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult(),
@@ -97,10 +99,20 @@ class MainActivity : ComponentActivity() {
             SideNoteTheme {
                 val locked by lockState.locked.collectAsState()
                 LaunchedEffect(locked) {
+                    val returningFromLock = lastObservedLocked == true && !locked
+                    lastObservedLocked = locked
                     if (!locked) {
                         dismissRequested = false
                         setShowWhenLocked(false)
+                        val reusedProtectedContent = protectedContentReady.value
                         initializeProtectedContent()
+                        if (
+                            returningFromLock &&
+                            reusedProtectedContent &&
+                            ::reviewViewModel.isInitialized
+                        ) {
+                            reviewViewModel.refresh()
+                        }
                     }
                 }
                 if (locked) {
@@ -140,8 +152,13 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         if (!::lockState.isInitialized) return
+        val protectedReentry = hasResumed
+        hasResumed = true
         lockState.refresh()
-        if (!lockState.locked.value && ::mainViewModel.isInitialized) refreshPermissionState()
+        if (!lockState.locked.value && ::mainViewModel.isInitialized) {
+            refreshPermissionState()
+            if (protectedReentry && ::reviewViewModel.isInitialized) reviewViewModel.refresh()
+        }
     }
 
     @Composable
@@ -173,6 +190,7 @@ class MainActivity : ComponentActivity() {
             onShowProjects = reviewViewModel::showProjects,
             onPreviousDay = reviewViewModel::previousDay,
             onNextDay = reviewViewModel::nextDay,
+            onSelectDate = reviewViewModel::selectDate,
             onToggleExpanded = reviewViewModel::toggleExpanded,
             onProcessedChange = reviewViewModel::setProcessed,
             onOpenProject = reviewViewModel::openProject,

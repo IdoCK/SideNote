@@ -60,6 +60,23 @@ class CaptureCoordinatorTest {
     }
 
     @Test
+    fun completionBeforeFirstPartialKeepsTerminalSpeech() = runTest {
+        coordinator.start(true, null)
+        speech.onStop = { coordinator.onSpeechFinal("first final", Locale.ENGLISH) }
+        coordinator.complete(CompletionSignal.ScreenOff)
+        assertThat(repository.appends).containsExactly(AppendCall("first final", instant, zone))
+    }
+
+    @Test
+    fun completionUsesCorrectedFinalInsteadOfFrozenPartial() = runTest {
+        coordinator.start(true, null)
+        coordinator.onSpeechPartial("wrong")
+        speech.onStop = { coordinator.onSpeechFinal("correct final", Locale.ENGLISH) }
+        coordinator.complete(CompletionSignal.FaceDown)
+        assertThat(repository.appends).containsExactly(AppendCall("correct final", instant, zone))
+    }
+
+    @Test
     fun defaultOffLaunchStartsWithVoiceDisabled() {
         coordinator.start(voiceDefaultOn = false, recovered = null)
 
@@ -297,7 +314,7 @@ class CaptureCoordinatorTest {
     }
 
     @Test
-    fun stopPortSeesDisabledSavingStateBeforeReentrantCallback() = runTest {
+    fun finishPortSeesFinalizingStateBeforeReentrantCallback() = runTest {
         var stateObservedByStop: CaptureState? = null
         speech.onStop = {
             stateObservedByStop = coordinator.state.value
@@ -307,8 +324,8 @@ class CaptureCoordinatorTest {
 
         coordinator.complete(CompletionSignal.RepeatedLaunch)
 
-        assertThat(stateObservedByStop?.voiceEnabled).isFalse()
-        assertThat(stateObservedByStop?.status).isEqualTo(CaptureStatus.Saving)
+        assertThat(stateObservedByStop?.voiceEnabled).isTrue()
+        assertThat(stateObservedByStop?.status).isEqualTo(CaptureStatus.Finalizing)
         assertThat(coordinator.state.value.status).isEqualTo(CaptureStatus.Saved)
     }
 
@@ -462,6 +479,56 @@ class CaptureCoordinatorTest {
     }
 
     @Test
+    fun uncertainAppendKeepsDraftAndRecoveryWithoutClaimingSuccessOrClosing() = runTest {
+        repository.result = AppendResult.Uncertain(RepositoryError.WriteFailed)
+        coordinator.start(false, RecoveryDraft("check provider", TextRange(14), false))
+
+        coordinator.complete(CompletionSignal.Backgrounded)
+
+        assertThat(coordinator.state.value.status).isEqualTo(CaptureStatus.SaveUncertain)
+        assertThat(coordinator.state.value.draft.text).isEqualTo("check provider")
+        assertThat(recovery.clearCalls).isEqualTo(0)
+        assertThat(haptic.confirmCalls).isEqualTo(0)
+        assertThat(closer.closeCalls).isEqualTo(0)
+
+        coordinator.complete(CompletionSignal.ScreenOff)
+
+        assertThat(repository.appends).hasSize(1)
+        assertThat(coordinator.state.value.status).isEqualTo(CaptureStatus.SaveUncertain)
+    }
+
+    @Test
+    fun delayedAppendCrossingMinuteBoundaryReportsTheCommittedAttemptTime() = runTest {
+        val advancingClock = AdvancingClock(
+            Instant.parse("2026-08-29T14:29:59Z"),
+            ZoneId.of("UTC"),
+        )
+        coordinator = CaptureCoordinator(
+            repository = repository,
+            recovery = recovery,
+            saveMutex = Mutex(),
+            clock = advancingClock,
+            zone = ZoneId.of("UTC"),
+            speech = speech,
+            haptic = haptic,
+            closer = closer,
+            notificationRefresher = notificationRefresher,
+        )
+        coordinator.start(false, RecoveryDraft("minute edge", TextRange(11), false))
+        val suspended = repository.suspendNextAppend()
+        val completion = launch { coordinator.complete(CompletionSignal.ScreenOff) }
+        suspended.started.await()
+
+        advancingClock.advanceSeconds(2)
+        suspended.release.complete(Unit)
+        completion.join()
+
+        assertThat(coordinator.state.value.savedTime).isEqualTo("14:29")
+        assertThat(repository.appends.single().committedAt)
+            .isEqualTo(Instant.parse("2026-08-29T14:29:59Z"))
+    }
+
+    @Test
     fun successfulCompletionRejectsAllLateEvents() = runTest {
         coordinator.start(true, RecoveryDraft("saved draft", TextRange(11), true))
         coordinator.complete(CompletionSignal.ScreenOff)
@@ -501,6 +568,27 @@ class CaptureCoordinatorTest {
         assertThat(closer.closeCalls).isEqualTo(1)
         assertThat(coordinator.state.value.draft.text).isEmpty()
         assertThat(coordinator.state.value.status).isEqualTo(CaptureStatus.Discarded)
+    }
+
+    @Test
+    fun failedRecoveryClearDoesNotClaimDiscardAndCanBeRetried() = runTest {
+        coordinator.start(false, RecoveryDraft("still owned", TextRange(11), false))
+        recovery.clearFailure = java.io.IOException("recovery unavailable")
+
+        coordinator.discard()
+
+        assertThat(coordinator.state.value.status).isEqualTo(CaptureStatus.Ready)
+        assertThat(coordinator.state.value.draft.text).isEqualTo("still owned")
+        assertThat(coordinator.state.value.recoveryWriteFailed).isTrue()
+        assertThat(haptic.confirmCalls).isEqualTo(0)
+        assertThat(closer.closeCalls).isEqualTo(0)
+
+        recovery.clearFailure = null
+        coordinator.discard()
+
+        assertThat(coordinator.state.value.status).isEqualTo(CaptureStatus.Discarded)
+        assertThat(haptic.confirmCalls).isEqualTo(1)
+        assertThat(closer.closeCalls).isEqualTo(1)
     }
 
     @Test
@@ -574,14 +662,31 @@ private data class SuspendedAppend(
     val release: CompletableDeferred<Unit>,
 )
 
+private class AdvancingClock(
+    private var current: Instant,
+    private val currentZone: ZoneId,
+) : Clock() {
+    override fun getZone(): ZoneId = currentZone
+
+    override fun withZone(zone: ZoneId): Clock = AdvancingClock(current, zone)
+
+    override fun instant(): Instant = current
+
+    fun advanceSeconds(seconds: Long) {
+        current = current.plusSeconds(seconds)
+    }
+}
+
 private class RecordingRecoveryDraftStore : RecoveryDraftStore {
     var clearCalls = 0
+    var clearFailure: Exception? = null
 
     override suspend fun load(): RecoveryLoadResult = RecoveryLoadResult.Empty
 
     override suspend fun save(draft: RecoveryDraft) = Unit
 
     override suspend fun clear() {
+        clearFailure?.let { throw it }
         clearCalls += 1
     }
 }

@@ -2,21 +2,27 @@ package com.sidenote.app.capture
 
 import android.content.Intent
 import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.input.TextFieldValue
+import androidx.lifecycle.ViewModelStore
 import com.google.common.truth.Truth.assertThat
 import com.sidenote.app.data.documents.AppendResult
 import com.sidenote.app.data.documents.DocumentRepository
 import com.sidenote.app.data.documents.UpdateResult
 import com.sidenote.app.data.markdown.EntrySource
+import com.sidenote.app.data.markdown.MarkdownCodec
 import com.sidenote.app.data.markdown.ParsedDailyFile
 import com.sidenote.app.data.recovery.RecoveryDraft
 import com.sidenote.app.data.recovery.RecoveryDraftStore
 import com.sidenote.app.data.recovery.RecoveryLoadResult
+import com.sidenote.app.data.recovery.RecoveryReadError
 import com.sidenote.app.data.settings.AppSettings
 import com.sidenote.app.data.settings.SettingsRepository
 import java.time.Clock
 import java.time.Instant
+import java.time.LocalDate
 import java.time.ZoneId
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
@@ -45,6 +51,211 @@ class CaptureViewModelTest {
     @After
     fun resetMainDispatcher() {
         Dispatchers.resetMain()
+    }
+
+    @Test
+    fun clearingHostAfterWriteBeforeIoReturnStillReconcilesRecovery() = runTest(mainDispatcher) {
+        val io = QueuedIoDispatcher()
+        val recovery = RecordingRecoveryStore()
+        var writes = 0
+        val repository = object : DocumentRepository by NoOpDocumentRepository {
+            override suspend fun append(text: String, committedAt: Instant, zone: ZoneId): AppendResult {
+                writes++
+                return AppendResult.Success
+            }
+        }
+        val viewModel = viewModel(SessionRecordingSpeechEngine(), this, recovery, repository, io)
+        val owner = ViewModelStore().apply { put("capture", viewModel) }
+        viewModel.start(Intent(), AppSettings(treeUri = null, voiceOnAtLaunch = false))
+        runCurrent()
+        viewModel.onUserEdit(TextFieldValue("save once"))
+        runCurrent()
+        viewModel.complete(CompletionSignal.ScreenOff)
+        runCurrent()
+        io.runPending()
+        assertThat(writes).isEqualTo(1)
+        owner.clear()
+        runCurrent()
+        io.runPending()
+        runCurrent()
+        assertThat(recovery.clearCount).isEqualTo(1)
+    }
+
+    @Test
+    fun unreadableRecoveryIsNeverClearedByBlankCompletionOrOverwrittenByTyping() = runTest(mainDispatcher) {
+        val speech = SessionRecordingSpeechEngine()
+        val recovery = RecordingRecoveryStore().apply {
+            loadResult = RecoveryLoadResult.ReadFailure(RecoveryReadError.Unavailable)
+        }
+        val viewModel = viewModel(speech, this, recovery)
+        viewModel.start(Intent())
+        viewModel.onCaptureStarted()
+        advanceUntilIdle()
+        viewModel.complete(CompletionSignal.ScreenOff)
+        advanceUntilIdle()
+        viewModel.onUserEdit(TextFieldValue("replacement"))
+        viewModel.onCaptureStopped(false)
+        advanceUntilIdle()
+        assertThat(recovery.clearCount).isEqualTo(0)
+        assertThat(recovery.saved).isEmpty()
+        assertThat(speech.listeners).isEmpty()
+        assertThat(viewModel.state.value.draft.text).isEmpty()
+    }
+
+    @Test
+    fun failedTemporaryMirrorDoesNotPreventExplicitMarkdownCompletion() = runTest(mainDispatcher) {
+        val recovery = RecordingRecoveryStore().apply { throwOnSave = true }
+        val viewModel = viewModel(SessionRecordingSpeechEngine(), this, recovery)
+        viewModel.start(Intent())
+        advanceUntilIdle()
+        viewModel.onUserEdit(TextFieldValue("in memory"))
+        advanceUntilIdle()
+        assertThat(viewModel.state.value.draft.text).isEqualTo("in memory")
+        viewModel.complete(CompletionSignal.ScreenOff)
+        advanceUntilIdle()
+        assertThat(viewModel.state.value.status).isEqualTo(CaptureStatus.Saved)
+        assertThat(recovery.clearCount).isEqualTo(1)
+    }
+
+    @Test
+    fun immediateCompletionSurfacesMirrorFailureWhenMarkdownAlsoCannotBeSaved() =
+        runTest(mainDispatcher) {
+            val recovery = RecordingRecoveryStore().apply { throwOnSave = true }
+            val repository = object : DocumentRepository by NoOpDocumentRepository {
+                override suspend fun append(
+                    text: String,
+                    committedAt: Instant,
+                    zone: ZoneId,
+                ): AppendResult = AppendResult.Failure(
+                    com.sidenote.app.data.documents.RepositoryError.WriteFailed,
+                )
+            }
+            val viewModel = viewModel(
+                SessionRecordingSpeechEngine(),
+                this,
+                recovery,
+                repository,
+            )
+            viewModel.start(Intent())
+            advanceUntilIdle()
+            viewModel.onUserEdit(TextFieldValue("only in memory"))
+            runCurrent()
+
+            viewModel.complete(CompletionSignal.ScreenOff)
+            advanceUntilIdle()
+
+            assertThat(viewModel.state.value.status).isEqualTo(CaptureStatus.SaveFailed)
+            assertThat(viewModel.state.value.recoveryWriteFailed).isTrue()
+            assertThat(recovery.clearCount).isEqualTo(0)
+        }
+
+    @Test
+    fun discardCanRetryAfterRecoveryClearFails() = runTest(mainDispatcher) {
+        val recovery = RecordingRecoveryStore().apply {
+            loadResult = RecoveryLoadResult.Draft(
+                RecoveryDraft("discard safely", TextRange(14), voiceEnabled = false),
+            )
+            throwOnClear = true
+        }
+        val viewModel = viewModel(SessionRecordingSpeechEngine(), this, recovery)
+        viewModel.start(Intent())
+        advanceUntilIdle()
+
+        viewModel.discard()
+        advanceUntilIdle()
+        assertThat(viewModel.state.value.status).isEqualTo(CaptureStatus.Ready)
+        assertThat(viewModel.state.value.recoveryWriteFailed).isTrue()
+
+        recovery.throwOnClear = false
+        viewModel.discard()
+        advanceUntilIdle()
+        assertThat(viewModel.state.value.status).isEqualTo(CaptureStatus.Discarded)
+        assertThat(recovery.clearCount).isEqualTo(1)
+    }
+
+    @Test
+    fun typedOnlySupportNeverStartsCaptureRecognitionAndTypingRemainsAvailable() = runTest(mainDispatcher) {
+        val speech = SessionRecordingSpeechEngine().apply { availability = SpeechAvailability.TypedOnly }
+        val viewModel = viewModel(speech, this)
+        viewModel.start(Intent())
+        viewModel.onCaptureStarted()
+        advanceUntilIdle()
+        assertThat(speech.listeners).isEmpty()
+        assertThat(viewModel.state.value.status).isEqualTo(CaptureStatus.SpeechUnavailable)
+        viewModel.onUserEdit(TextFieldValue("typed safely"))
+        advanceUntilIdle()
+        assertThat(viewModel.state.value.draft.text).isEqualTo("typed safely")
+    }
+
+    @Test
+    fun twoUtterancesContinueWithASeparatorAndStaleCallbacksAreIgnored() = runTest(mainDispatcher) {
+        val speech = SessionRecordingSpeechEngine()
+        val viewModel = viewModel(speech, this)
+        viewModel.start(Intent())
+        viewModel.onCaptureStarted()
+        advanceUntilIdle()
+        val first = speech.listeners.single()
+        first.onFinal("first thought")
+        advanceUntilIdle()
+        assertThat(speech.listeners).hasSize(2)
+        first.onPartial("stale")
+        speech.listeners.last().onPartial("second")
+        runCurrent()
+        assertThat(viewModel.state.value.draft.text).isEqualTo("first thought second")
+        speech.listeners.last().onFinal("second thought")
+        advanceUntilIdle()
+        assertThat(viewModel.state.value.draft.text).isEqualTo("first thought second thought")
+    }
+
+    @Test
+    fun normalSilenceRestartsWithoutPermanentUnavailableState() = runTest(mainDispatcher) {
+        val speech = SessionRecordingSpeechEngine()
+        val viewModel = viewModel(speech, this)
+        viewModel.start(Intent())
+        viewModel.onCaptureStarted()
+        advanceUntilIdle()
+        speech.listeners.last().onUnavailable(SpeechFailure.SpeechTimeout)
+        advanceUntilIdle()
+        assertThat(viewModel.state.value.voiceEnabled).isTrue()
+        assertThat(viewModel.state.value.status).isEqualTo(CaptureStatus.Ready)
+        assertThat(speech.listeners).hasSize(2)
+    }
+
+    @Test
+    fun pendingUtteranceRestartCannotSurviveTypingOffDiscardCompletionOrPause() = runTest(mainDispatcher) {
+        val actions: List<(CaptureViewModel) -> Unit> = listOf(
+            { it.onUserEdit(TextFieldValue("typed")) },
+            { it.onVoiceToggle() },
+            { it.discard() },
+            { it.complete(CompletionSignal.ScreenOff) },
+            { it.onCaptureStopped(false) },
+        )
+        actions.forEach { action ->
+            val speech = SessionRecordingSpeechEngine()
+            val viewModel = viewModel(speech, this)
+            viewModel.start(Intent())
+            viewModel.onCaptureStarted()
+            advanceUntilIdle()
+            speech.listeners.last().onFinal("first")
+            runCurrent()
+            action(viewModel)
+            advanceUntilIdle()
+            assertThat(speech.listeners).hasSize(1)
+        }
+    }
+
+    @Test
+    fun terminalSpeechDuringCompletionReachesCoordinatorWithoutEventMutexDeadlock() = runTest(mainDispatcher) {
+        val speech = SessionRecordingSpeechEngine()
+        val viewModel = viewModel(speech, this)
+        viewModel.start(Intent())
+        viewModel.onCaptureStarted()
+        advanceUntilIdle()
+        speech.onFinish = { speech.listeners.last().onFinal("finished thought") }
+        viewModel.complete(CompletionSignal.ScreenOff)
+        advanceUntilIdle()
+        assertThat(viewModel.state.value.draft.text).isEqualTo("finished thought")
+        assertThat(viewModel.state.value.status).isEqualTo(CaptureStatus.Saved)
     }
 
     @Test
@@ -143,15 +354,69 @@ class CaptureViewModelTest {
             )
         }
 
+    @Test
+    fun projectSuggestionsNeverReadHistoryUntilUnlockedAndRefreshFromMarkdownSource() =
+        runTest(mainDispatcher) {
+            val repository = SuggestionRepository(
+                listOf(day("2026-08-30", "- [ ] **09:00** Plan @Home\n")),
+            )
+            val viewModel = viewModel(
+                SessionRecordingSpeechEngine(),
+                this,
+                repository = repository,
+            )
+            viewModel.start(Intent())
+            advanceUntilIdle()
+
+            viewModel.refreshProjectSuggestions(unlocked = false)
+            advanceUntilIdle()
+            assertThat(repository.dayReads).isEqualTo(0)
+            assertThat(viewModel.state.value.projectSuggestions).isEmpty()
+
+            viewModel.onUserEdit(
+                TextFieldValue(
+                    text = "For @ho",
+                    selection = TextRange(7),
+                    composition = TextRange(4, 7),
+                ),
+            )
+            advanceUntilIdle()
+            viewModel.refreshProjectSuggestions(unlocked = true)
+            advanceUntilIdle()
+
+            assertThat(repository.dayReads).isEqualTo(1)
+            assertThat(viewModel.state.value.projectSuggestions.map { it.display })
+                .containsExactly("Home")
+            assertThat(viewModel.state.value.draft.selection).isEqualTo(TextRange(7))
+            assertThat(viewModel.state.value.draft.composition).isEqualTo(TextRange(4, 7))
+
+            repository.days = listOf(
+                day("2026-08-31", "- [ ] **10:00** Call @Work and @בית\n"),
+            )
+            viewModel.refreshProjectSuggestions(unlocked = true)
+            advanceUntilIdle()
+
+            assertThat(repository.dayReads).isEqualTo(2)
+            assertThat(viewModel.state.value.projectSuggestions.map { it.display })
+                .containsExactly("Work", "בית").inOrder()
+
+            viewModel.refreshProjectSuggestions(unlocked = false)
+            advanceUntilIdle()
+            assertThat(repository.dayReads).isEqualTo(2)
+            assertThat(viewModel.state.value.projectSuggestions).isEmpty()
+        }
+
     private fun viewModel(
         speech: SpeechEngine,
         recoveryScope: CoroutineScope,
         recovery: RecoveryDraftStore = EmptyRecoveryStore(),
+        repository: DocumentRepository = NoOpDocumentRepository,
+        ioDispatcher: CoroutineDispatcher = mainDispatcher,
     ): CaptureViewModel {
         return CaptureViewModel(
             CaptureDependencies(
                 settings = FixedSettingsRepository(),
-                repository = NoOpDocumentRepository,
+                repository = repository,
                 speechFactory = { speech },
                 completionSignals = MutableSharedFlow(),
                 clock = Clock.fixed(
@@ -159,17 +424,24 @@ class CaptureViewModelTest {
                     ZoneId.of("America/New_York"),
                 ),
                 zone = ZoneId.of("America/New_York"),
-                ioDispatcher = mainDispatcher,
+                ioDispatcher = ioDispatcher,
                 recoveryHandoff = CaptureRecoveryHandoff(recovery, recoveryScope),
             ),
         )
     }
+
+    private fun day(date: String, body: String): ParsedDailyFile =
+        MarkdownCodec().parse(LocalDate.parse(date), "# $date\n\n$body")
 }
 
 private class SessionRecordingSpeechEngine : SpeechEngine {
     val listeners = mutableListOf<SpeechEngine.Listener>()
+    var onFinish: () -> Unit = {}
+    var availability = SpeechAvailability.Available
 
-    override suspend fun support(): SpeechAvailability = SpeechAvailability.Available
+    override suspend fun finish() = onFinish()
+
+    override suspend fun support(): SpeechAvailability = availability
 
     override suspend fun requestModelDownloads() = Unit
 
@@ -210,14 +482,22 @@ private class EmptyRecoveryStore : RecoveryDraftStore {
 
 private class RecordingRecoveryStore : RecoveryDraftStore {
     val saved = mutableListOf<RecoveryDraft>()
+    var loadResult: RecoveryLoadResult = RecoveryLoadResult.Empty
+    var clearCount = 0
+    var throwOnSave = false
+    var throwOnClear = false
 
-    override suspend fun load(): RecoveryLoadResult = RecoveryLoadResult.Empty
+    override suspend fun load(): RecoveryLoadResult = loadResult
 
     override suspend fun save(draft: RecoveryDraft) {
+        if (throwOnSave) throw java.io.IOException("temporary mirror unavailable")
         saved += draft
     }
 
-    override suspend fun clear() = Unit
+    override suspend fun clear() {
+        if (throwOnClear) throw java.io.IOException("temporary mirror unavailable")
+        clearCount++
+    }
 }
 
 private object NoOpDocumentRepository : DocumentRepository {
@@ -235,6 +515,36 @@ private object NoOpDocumentRepository : DocumentRepository {
         expectedRaw: String,
         processed: Boolean,
     ): UpdateResult = error("Not used by CaptureViewModelTest")
+
+    override suspend fun uncheckedCount(): Int = 0
+}
+
+private class QueuedIoDispatcher : CoroutineDispatcher() {
+    private val queue = java.util.ArrayDeque<Runnable>()
+    override fun dispatch(context: kotlin.coroutines.CoroutineContext, block: Runnable) { queue.add(block) }
+    fun runPending() { while (queue.isNotEmpty()) queue.removeFirst().run() }
+}
+
+private class SuggestionRepository(var days: List<ParsedDailyFile>) : DocumentRepository {
+    var dayReads = 0
+
+    override suspend fun append(
+        text: String,
+        committedAt: Instant,
+        zone: ZoneId,
+    ): AppendResult = AppendResult.Success
+
+    override suspend fun days(): List<ParsedDailyFile> {
+        dayReads += 1
+        return days
+    }
+
+    override suspend fun setProcessed(
+        source: EntrySource,
+        fileName: String,
+        expectedRaw: String,
+        processed: Boolean,
+    ): UpdateResult = error("Not used by project suggestion test")
 
     override suspend fun uncheckedCount(): Int = 0
 }

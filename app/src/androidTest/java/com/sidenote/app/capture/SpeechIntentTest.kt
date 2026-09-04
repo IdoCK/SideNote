@@ -1,10 +1,13 @@
 package com.sidenote.app.capture
 
+import android.content.Intent
+import android.speech.RecognitionService
 import android.speech.RecognizerIntent
 import android.os.Looper
 import android.os.Bundle
 import android.speech.SpeechRecognizer
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
 import com.google.common.truth.Truth.assertThat
 import java.util.concurrent.Executors
 import kotlinx.coroutines.Dispatchers
@@ -15,6 +18,21 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class SpeechIntentTest {
+    @Test
+    fun recognitionServiceDiscoveryIsSafeWhenAProviderIsPresentOrAbsent() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val services = context.packageManager.queryIntentServices(
+            Intent(RecognitionService.SERVICE_INTERFACE),
+            0,
+        )
+
+        assertThat(services).doesNotContain(null)
+        services.forEach { result ->
+            assertThat(result.serviceInfo?.packageName).isNotEmpty()
+            assertThat(result.serviceInfo?.name).isNotEmpty()
+        }
+    }
+
     @Test
     fun nullEmptyAndBlankRecognitionBundlesStillProduceTerminalSignals() {
         val empty = Bundle()

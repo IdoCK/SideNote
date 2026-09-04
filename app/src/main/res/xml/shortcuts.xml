@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:shortcutId="review"
+        android:enabled="true"
+        android:shortcutShortLabel="@string/shortcut_review_short_label"
+        android:shortcutLongLabel="@string/shortcut_review_long_label"
+        android:shortcutDisabledMessage="@string/shortcut_review_disabled_message">
+        <intent
+            android:action="com.sidenote.app.REVIEW"
+            android:targetPackage="com.sidenote.app"
+            android:targetClass="com.sidenote.app.capture.CaptureActivity" />
+    </shortcut>
+</shortcuts>

@@ -2,6 +2,7 @@ package com.sidenote.app.data.recovery
 
 import kotlin.time.Duration
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancelAndJoin
@@ -14,6 +15,7 @@ class RecoveryDraftWriter(
     private val store: RecoveryDraftStore,
     private val scope: CoroutineScope,
     private val debounce: Duration,
+    private val onPersistenceResult: (Boolean) -> Unit = {},
 ) {
     private val writeMutex = Mutex()
     private var pendingWrite: Job? = null
@@ -23,16 +25,33 @@ class RecoveryDraftWriter(
         pendingWrite = scope.launch(start = CoroutineStart.UNDISPATCHED) {
             delay(debounce)
             writeMutex.withLock {
-                store.save(draft)
+                persist(draft)
             }
         }
     }
 
-    suspend fun flushOnStop(draft: RecoveryDraft) {
-        pendingWrite?.cancelAndJoin()
+    fun cancelPending() {
+        pendingWrite?.cancel()
         pendingWrite = null
+    }
+
+    suspend fun flushOnStop(draft: RecoveryDraft) {
+        val pending = pendingWrite
+        pendingWrite = null
+        pending?.cancelAndJoin()
         writeMutex.withLock {
+            persist(draft)
+        }
+    }
+
+    private suspend fun persist(draft: RecoveryDraft) {
+        try {
             store.save(draft)
+            onPersistenceResult(true)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Exception) {
+            onPersistenceResult(false)
         }
     }
 }

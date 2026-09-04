@@ -68,6 +68,7 @@ The successful save attempt's **local** date selects `YYYY-MM-DD.md`; local time
 # 2026-08-27
 
 - [ ] **18:26** רעיון חדש @SideNote
+
 - [ ] **18:30** @Home-Renovation First line
   Second line in the same capture.
 ```
@@ -76,10 +77,12 @@ The successful save attempt's **local** date selects `YYYY-MM-DD.md`; local time
 
 `@ProjectName` names contain Unicode letters/digits, with hyphens or underscores instead of spaces. A note can contain multiple tokens; the first observed spelling is used for display during a scan. Explicit English/Hebrew voice commands remove the command phrase and insert the corresponding token. Ambiguous commands remain prose. Rename/merge is performed by editing Markdown externally, not through a hidden project database.
 
-Dates has explicit Previous/Next buttons, and Projects can jump back to the source day. The ongoing unprocessed reminder is derived by scanning recognized unchecked tasks; disabling notification permission does not prevent capture or Review.
+After unlock, typing `@` in Capture offers matching project names rescanned from the Markdown source; no project index is created. Dates has a scrollable date browser and horizontal swipe alongside explicit Previous/Next buttons, and Projects can jump back to the source day. Review is also available from the launcher's static **Review SideNote** long-press shortcut even when there are zero notes or notifications are denied. The ongoing unprocessed reminder is derived by scanning recognized unchecked tasks; disabling notification permission does not prevent capture or Review.
 
 ## Failed writes and recovery
 
-Permission loss or a failed document write must not be treated as a saved note. SideNote retains a single temporary app-private recovery draft; reopen Capture to restore it, repair folder access through unlocked Settings, then finish the capture again to retry. It clears recovery only after a confirmed Markdown write or deliberate Discard. Do not uninstall or clear app data while a draft is unsaved: the temporary recovery copy is app-private and will be lost.
+Permission loss or a failed document write must not be treated as a saved note. SideNote retains a single temporary app-private recovery draft; reopen Capture to restore it, repair folder access through unlocked Settings, then finish the capture again to retry. It clears recovery only after a confirmed Markdown write or deliberate Discard. If Android reports an uncertain result after a provider operation may already have changed the folder, SideNote keeps the draft/recovery copy and asks you to inspect the Markdown file before retrying. Do not uninstall or clear app data while a draft is unsaved: the temporary recovery copy is app-private and will be lost.
 
-Concurrent external edits cause a conflict/reload instead of a broad overwrite. Unknown Markdown is left untouched. SAF providers cannot promise universal atomic replacement: provider/device failure during truncating writes remains a storage-provider risk, so maintain independent backups of important notes. The automated failure fixture specifically rejects writes **before truncation**; it does not certify arbitrary provider crash recovery.
+Concurrent external edits detected before replacement cause a conflict/reload instead of a broad overwrite. Unknown Markdown is left untouched. SideNote never truncates the authoritative target in place: on providers that advertise sibling creation and rename, it writes and verifies a uniquely named app-owned stage, immediately revalidates the target, renames the original to an app-owned backup, then installs and verifies the replacement. An interrupted owned backup is restored only when the target is absent; these artifacts are ignored as note/project/status truth and are removed only when their private ownership marker and contents are verified.
+
+Android's generic Storage Access Framework does not provide cross-provider compare-and-swap or a universal atomic-replace guarantee. A provider may misreport capabilities, violate rename behavior, or race an external writer after SideNote's last validation. SideNote therefore fails closed on missing capabilities, reports post-mutation ambiguity as uncertain, preserves recoverable artifacts, and never calls this process atomic. Keep independent backups of important notes; providers without the required create/rename behavior are unsupported for writes.

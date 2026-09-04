@@ -10,6 +10,7 @@ import com.sidenote.app.data.documents.DocumentRepository
 import com.sidenote.app.data.documents.UpdateResult
 import com.sidenote.app.data.markdown.EntrySource
 import com.sidenote.app.data.markdown.ParsedDailyFile
+import com.sidenote.app.data.markdown.ProjectToken
 import com.sidenote.app.data.recovery.RecoveryDraft
 import com.sidenote.app.data.recovery.RecoveryDraftWriter
 import com.sidenote.app.data.recovery.RecoveryLoadResult
@@ -30,6 +31,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -40,6 +42,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 data class CaptureDependencies(
     val settings: SettingsRepository,
@@ -62,6 +65,7 @@ class CaptureViewModel(
 
     private val started = AtomicBoolean(false)
     private val speechSessionGeneration = AtomicLong(0L)
+    private val suggestionAccessGeneration = AtomicLong(0L)
     private val coordinatorReady = CompletableDeferred<CaptureCoordinator>()
     private val eventMutex = Mutex()
     private val host = MutableCaptureHost()
@@ -82,13 +86,17 @@ class CaptureViewModel(
     @Volatile private var captureActive = false
     @Volatile private var setupInFlight = false
     @Volatile private var backgroundCompletionArmed = false
+    @Volatile private var projectSuggestionAccess = false
     private var captureLifecycleGeneration = 0L
     private var speechStartupJob: Job? = null
+    private var speechRestartJob: Job? = null
     private var terminalCompletion = false
     private var coordinator: CaptureCoordinator? = null
     private var recoveryWriter: RecoveryDraftWriter? = null
     private var speech: SpeechEngine? = null
     private var detectedLanguageTag: String? = null
+    private var recoveryUnreadable = false
+    private var voiceDefaultOn = true
 
     fun attachHost(
         token: Any,
@@ -114,7 +122,10 @@ class CaptureViewModel(
                 val settings = preloadedSettings ?: withContext(dependencies.ioDispatcher) {
                     dependencies.settings.settings.first()
                 }
-                val recovered = when (val result = recoverySession.load()) {
+                voiceDefaultOn = settings.voiceOnAtLaunch
+                val loaded = recoverySession.load()
+                recoveryUnreadable = loaded is RecoveryLoadResult.ReadFailure
+                val recovered = when (val result = loaded) {
                     is RecoveryLoadResult.Draft -> result.draft
                     RecoveryLoadResult.Empty,
                     is RecoveryLoadResult.CorruptDraft,
@@ -126,6 +137,7 @@ class CaptureViewModel(
                     store = recoverySession,
                     scope = viewModelScope,
                     debounce = RECOVERY_DEBOUNCE,
+                    onPersistenceResult = { success -> coordinator?.onRecoveryPersistenceResult(success) },
                 )
                 val currentCoordinator = CaptureCoordinator(
                     repository = dispatchedRepository,
@@ -137,12 +149,14 @@ class CaptureViewModel(
                     haptic = host,
                     closer = host,
                     notificationRefresher = dispatchedNotificationRefresher,
+                    commitLifetime = CaptureCommitLifetime(recoverySession::reconcile),
                 )
 
                 currentCoordinator.start(
                     voiceDefaultOn = settings.voiceOnAtLaunch,
                     recovered = recovered,
                 )
+                if (recoveryUnreadable) currentCoordinator.onRecoveryUnreadable()
                 speech = currentSpeech
                 recoveryWriter = writer
                 coordinator = currentCoordinator
@@ -189,17 +203,23 @@ class CaptureViewModel(
         captureLifecycleGeneration += 1
         speechStartupJob?.cancel()
         speechStartupJob = null
-        speechSessionGeneration.incrementAndGet()
-        coordinator?.onSpeechStopped()
-        speech?.stop()
+        speechRestartJob?.cancel()
         val shouldCompleteFromThisStop = completeIfBackgrounded && backgroundCompletionArmed
+        val completing = coordinator?.state?.value?.status in
+            setOf(CaptureStatus.Finalizing, CaptureStatus.Saving)
+        if (!shouldCompleteFromThisStop && !completing) {
+            speechSessionGeneration.incrementAndGet()
+            coordinator?.onSpeechStopped()
+            speech?.stop()
+        }
         viewModelScope.launch(start = CoroutineStart.UNDISPATCHED) {
             val currentCoordinator = awaitCoordinator() ?: return@launch
             eventMutex.withLock {
                 if (terminalCompletion) return@withLock
-                flushRecovery(currentCoordinator)
                 if (shouldCompleteFromThisStop) {
                     completeLocked(currentCoordinator, CompletionSignal.Backgrounded)
+                } else {
+                    flushRecovery(currentCoordinator)
                 }
             }
         }
@@ -238,7 +258,6 @@ class CaptureViewModel(
             val currentCoordinator = awaitCoordinator() ?: return@launch
             eventMutex.withLock {
                 if (terminalCompletion) return@withLock
-                flushRecovery(currentCoordinator)
                 completeLocked(currentCoordinator, signal)
             }
         }
@@ -246,6 +265,55 @@ class CaptureViewModel(
 
     fun onUserEdit(value: TextFieldValue) {
         mutateDraft { currentCoordinator -> currentCoordinator.onUserEdit(value) }
+    }
+
+    /** Protected history is queried only after the host has observed an unlocked state. */
+    fun refreshProjectSuggestions(unlocked: Boolean) {
+        projectSuggestionAccess = unlocked
+        val generation = suggestionAccessGeneration.incrementAndGet()
+        if (!unlocked) {
+            coordinator?.onProjectSuggestions(emptyList())
+            return
+        }
+        viewModelScope.launch {
+            val currentCoordinator = awaitCoordinator() ?: return@launch
+            val projects = try {
+                dispatchedRepository.days()
+                    .asSequence()
+                    .flatMap { day -> day.entries.asSequence() }
+                    .flatMap { entry -> entry.projects.asSequence() }
+                    .associateBy(ProjectToken::key)
+                    .values
+                    .sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER, ProjectToken::display))
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                emptyList()
+            }
+            eventMutex.withLock {
+                if (
+                    projectSuggestionAccess &&
+                    generation == suggestionAccessGeneration.get() &&
+                    !terminalCompletion
+                ) {
+                    currentCoordinator.onProjectSuggestions(projects)
+                }
+            }
+        }
+    }
+
+    fun retryRecovery() {
+        viewModelScope.launch {
+            val current = awaitCoordinator() ?: return@launch
+            eventMutex.withLock {
+                if (!recoveryUnreadable) return@withLock
+                val loaded = recoverySession.load()
+                if (loaded is RecoveryLoadResult.ReadFailure) return@withLock
+                recoveryUnreadable = false
+                current.start(voiceDefaultOn, (loaded as? RecoveryLoadResult.Draft)?.draft)
+                startSpeechIfEligible(current)
+            }
+        }
     }
 
     fun onVoiceToggle() {
@@ -263,9 +331,10 @@ class CaptureViewModel(
             val currentCoordinator = awaitCoordinator() ?: return@launch
             eventMutex.withLock {
                 if (terminalCompletion) return@withLock
-                flushRecovery(currentCoordinator)
+                recoveryWriter?.cancelPending()
                 currentCoordinator.discard()
-                terminalCompletion = true
+                terminalCompletion =
+                    currentCoordinator.state.value.status == CaptureStatus.Discarded
             }
         }
     }
@@ -275,7 +344,10 @@ class CaptureViewModel(
         captureLifecycleGeneration += 1
         speechStartupJob?.cancel()
         speechStartupJob = null
+        speechRestartJob?.cancel()
         speechSessionGeneration.incrementAndGet()
+        suggestionAccessGeneration.incrementAndGet()
+        projectSuggestionAccess = false
         coordinator?.onSpeechStopped()
         speech?.stop()
         speech?.destroy()
@@ -290,19 +362,32 @@ class CaptureViewModel(
         currentCoordinator: CaptureCoordinator,
         signal: CompletionSignal,
     ) {
-        val blank = currentCoordinator.state.value.draft.text.isBlank()
+        if (recoveryUnreadable) return
+        // Completion owns the durable mirror + append + clear transaction. A delayed
+        // debounce must not run after that clear and resurrect a completed draft.
+        recoveryWriter?.cancelPending()
         currentCoordinator.complete(signal)
         val status = currentCoordinator.state.value.status
-        if (blank || status == CaptureStatus.Saved) {
+        if (currentCoordinator.state.value.draft.text.isBlank() || status == CaptureStatus.Saved) {
             terminalCompletion = true
         }
     }
 
     private suspend fun flushRecovery(currentCoordinator: CaptureCoordinator) {
-        if (terminalCompletion) return
+        if (terminalCompletion || recoveryUnreadable) return
         val current = currentCoordinator.state.value
         if (current.status == CaptureStatus.Saved || current.status == CaptureStatus.Discarded) return
-        recoveryWriter?.flushOnStop(current.toRecoveryDraft())
+        // Enqueue before the first suspension. The handoff's process scope then owns the
+        // finite write even if Activity teardown immediately clears this ViewModel.
+        recoveryWriter?.cancelPending()
+        val flush = recoverySession.flushInBackground(current.toRecoveryDraft())
+        try {
+            currentCoordinator.onRecoveryPersistenceResult(flush.await())
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Exception) {
+            currentCoordinator.onRecoveryPersistenceResult(false)
+        }
     }
 
     private fun mutateDraft(mutation: (CaptureCoordinator) -> Unit) {
@@ -320,7 +405,7 @@ class CaptureViewModel(
         }
     }
 
-    private fun startSpeechIfEligible(currentCoordinator: CaptureCoordinator) {
+    private suspend fun startSpeechIfEligible(currentCoordinator: CaptureCoordinator) {
         val current = currentCoordinator.state.value
         if (
             !captureActive ||
@@ -328,6 +413,12 @@ class CaptureViewModel(
             !current.voiceEnabled ||
             current.status != CaptureStatus.Ready
         ) {
+            return
+        }
+        val available = withTimeoutOrNull(3000L) { speech?.support() }
+        if (!captureActive || !currentCoordinator.state.value.voiceEnabled || terminalCompletion) return
+        if (available != SpeechAvailability.Available) {
+            currentCoordinator.onSpeechFailure()
             return
         }
         val generation = speechSessionGeneration.incrementAndGet()
@@ -348,7 +439,9 @@ class CaptureViewModel(
                 ?: Locale.getDefault()
             mutateSpeech(generation) { currentCoordinator ->
                 currentCoordinator.onSpeechFinal(text, locale)
-                speechSessionGeneration.compareAndSet(generation, generation + 1)
+                if (speechSessionGeneration.compareAndSet(generation, generation + 1)) {
+                    restartAfterUtterance(generation + 1)
+                }
             }
         }
 
@@ -364,8 +457,24 @@ class CaptureViewModel(
 
         override fun onUnavailable(failure: SpeechFailure) {
             mutateSpeech(generation) { currentCoordinator ->
-                currentCoordinator.onSpeechFailure()
-                speechSessionGeneration.compareAndSet(generation, generation + 1)
+                val ordinarySilence = failure == SpeechFailure.NoMatch ||
+                    failure == SpeechFailure.SpeechTimeout
+                if (ordinarySilence) currentCoordinator.onSpeechStopped()
+                else currentCoordinator.onSpeechFailure()
+                if (speechSessionGeneration.compareAndSet(generation, generation + 1) && ordinarySilence) {
+                    restartAfterUtterance(generation + 1)
+                }
+            }
+        }
+    }
+
+    private fun restartAfterUtterance(generation: Long) {
+        speechRestartJob?.cancel()
+        speechRestartJob = viewModelScope.launch {
+            delay(300L)
+            val current = awaitCoordinator() ?: return@launch
+            eventMutex.withLock {
+                if (generation == speechSessionGeneration.get()) startSpeechIfEligible(current)
             }
         }
     }
@@ -375,6 +484,13 @@ class CaptureViewModel(
         mutation: (CaptureCoordinator) -> Unit,
     ) {
         if (generation != speechSessionGeneration.get()) return
+        // Completion owns eventMutex while awaiting the recognizer. Terminal callbacks must
+        // enter the coordinator's synchronized owned span before that bounded wait returns.
+        val current = coordinator
+        if (current?.state?.value?.status == CaptureStatus.Finalizing) {
+            mutation(current)
+            return
+        }
         mutateDraft { currentCoordinator ->
             if (generation == speechSessionGeneration.get()) {
                 mutation(currentCoordinator)

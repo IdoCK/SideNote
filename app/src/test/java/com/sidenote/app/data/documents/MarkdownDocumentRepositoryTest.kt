@@ -70,6 +70,30 @@ class MarkdownDocumentRepositoryTest {
     }
 
     @Test
+    fun uncertainPostWriteOutcomeIsPreservedForCaptureAndCheckboxCallers() = runTest {
+        val original = "# 2026-08-27\n\n- [ ] **08:00** Existing\n"
+        store.put("2026-08-27.md", original)
+        store.nextWriteOutcome = WriteOutcome.Uncertain(RepositoryError.WriteFailed)
+
+        val append = repo.append(
+            "new",
+            Instant.parse("2026-08-27T13:00:00Z"),
+            zone("America/New_York"),
+        )
+
+        assertThat(append).isEqualTo(AppendResult.Uncertain(RepositoryError.WriteFailed))
+
+        val source = MarkdownCodec()
+            .parse(java.time.LocalDate.parse("2026-08-27"), original)
+            .entries.single().source
+        store.nextWriteOutcome = WriteOutcome.Uncertain(RepositoryError.PermissionLost)
+
+        val update = repo.setProcessed(source, "2026-08-27.md", original, true)
+
+        assertThat(update).isEqualTo(UpdateResult.Uncertain(RepositoryError.PermissionLost))
+    }
+
+    @Test
     fun malformedDailyFilesStayReadable() = runTest {
         val malformed = "# handwritten material\n\n- [ ] **not-a-time** keep me\n"
         store.put("2026-08-26.md", malformed)

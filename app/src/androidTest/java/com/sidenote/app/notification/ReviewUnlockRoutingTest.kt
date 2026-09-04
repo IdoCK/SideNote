@@ -20,6 +20,8 @@ import androidx.test.core.app.ActivityScenario
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import androidx.test.runner.lifecycle.ActivityLifecycleMonitorRegistry
+import androidx.test.runner.lifecycle.Stage
 import com.google.common.truth.Truth.assertThat
 import com.sidenote.app.AppContainer
 import com.sidenote.app.MainActivity
@@ -86,8 +88,80 @@ class ReviewUnlockRoutingTest {
     fun restoreContainer() {
         captureScenario?.close()
         mainScenario?.close()
+        finishUntrackedSideNoteActivities()
         container?.close()
         application.installContainerForTesting(originalContainer)
+    }
+
+    @Test
+    fun staticReviewShortcutIsAvailableWithoutNotificationsOrAnyNotes() {
+        val fake = UnlockRoutingContainer(false, configuredSettings(), emptyList()).also(::install)
+        val shortcuts = targetContext.getSystemService(android.content.pm.ShortcutManager::class.java)
+            .manifestShortcuts
+        assertThat(shortcuts.map { it.id }).contains("review")
+        val shortcutIntent = shortcuts.first { it.id == "review" }.intent!!
+        assertThat(shortcutIntent.component?.className).isEqualTo(CaptureActivity::class.java.name)
+        captureScenario = ActivityScenario.launch(shortcutIntent.addFlags(
+            Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK,
+        ))
+        compose.onNodeWithContentDescription("Settings").performClick()
+        compose.onNodeWithText("Notes folder").assertIsDisplayed()
+        assertThat(fake.recovery.loads.get()).isEqualTo(0)
+    }
+
+    @Test
+    fun resumedExistingReviewRefreshesExternalAddEditAndDeleteWithReusedUnlock() {
+        val fake = UnlockRoutingContainer(
+            initiallyLocked = false,
+            settings = configuredSettings(),
+            days = listOf(
+                day("2026-08-26", "- [ ] **08:00** delete me"),
+                day("2026-08-27", "- [ ] **09:00** edit me"),
+            ),
+        ).also(::install)
+        mainScenario = ActivityScenario.launch(MainActivity::class.java)
+        compose.onNodeWithText("edit me").assertIsDisplayed()
+        assertThat(fake.repository.daysCalls.get()).isEqualTo(1)
+
+        mainScenario?.moveToState(androidx.lifecycle.Lifecycle.State.CREATED)
+        fake.repository.replaceDays(
+            listOf(
+                day("2026-08-27", "- [ ] **09:00** edited outside"),
+                day("2026-08-28", "- [ ] **10:00** added outside"),
+            ),
+        )
+        mainScenario?.moveToState(androidx.lifecycle.Lifecycle.State.RESUMED)
+
+        compose.waitUntil(timeoutMillis = 5_000) { fake.repository.daysCalls.get() >= 2 }
+        compose.onNodeWithText("edited outside").assertIsDisplayed()
+        compose.onNodeWithContentDescription("Next day").performClick()
+        compose.onNodeWithText("added outside").assertIsDisplayed()
+        compose.onNodeWithText("delete me").assertDoesNotExist()
+        assertThat(fake.repository.daysCalls.get()).isEqualTo(2)
+    }
+
+    @Test
+    fun lockedReviewShortcutRecreationAndRepeatedIntentsLoadNothingUntilUnlock() {
+        val fake = UnlockRoutingContainer(true, configuredSettings(), emptyList()).also(::install)
+        val shortcut = Intent(targetContext, CaptureActivity::class.java)
+            .setAction("com.sidenote.app.REVIEW")
+        captureScenario = ActivityScenario.launch(shortcut)
+        compose.onNodeWithText("Unlock SideNote").assertIsDisplayed()
+        captureScenario?.recreate()
+        repeat(2) {
+            targetContext.startActivity(Intent(shortcut).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or
+                Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP))
+        }
+        compose.waitForIdle()
+        assertThat(fake.settings.reads.get()).isEqualTo(0)
+        assertThat(fake.recovery.loads.get()).isEqualTo(0)
+        assertThat(fake.repository.daysCalls.get()).isEqualTo(0)
+        fake.lockState.unlock()
+        compose.waitUntil(timeoutMillis = 5_000) {
+            fake.mainDependenciesCalls.get() == 1 && fake.repository.daysCalls.get() == 1
+        }
+        compose.onNodeWithContentDescription("Settings").assertIsDisplayed()
+        assertThat(fake.recovery.loads.get()).isEqualTo(0)
     }
 
     @Test
@@ -128,10 +202,10 @@ class ReviewUnlockRoutingTest {
         assertThat(fake.mainDependenciesCalls.get()).isEqualTo(0)
         assertThat(fake.repository.daysCalls.get()).isEqualTo(0)
 
-        fake.lockState.unlock()
+        compose.runOnIdle(fake.lockState::unlock)
 
         compose.waitUntil(timeoutMillis = 5_000) {
-            fake.repository.daysCalls.get() == 1 && fake.settings.reads.get() >= 1
+            fake.repository.daysCalls.get() >= 1 && fake.settings.reads.get() >= 1
         }
         compose.onNodeWithText("most recent unchecked").assertIsDisplayed()
         compose.onNodeWithText("newer processed note").assertDoesNotExist()
@@ -345,6 +419,25 @@ class ReviewUnlockRoutingTest {
         shellOutput(command)
     }
 
+    private fun finishUntrackedSideNoteActivities() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        instrumentation.runOnMainSync {
+            val monitor = ActivityLifecycleMonitorRegistry.getInstance()
+            listOf(
+                Stage.CREATED,
+                Stage.STARTED,
+                Stage.RESUMED,
+                Stage.PAUSED,
+                Stage.STOPPED,
+            ).flatMap { stage -> monitor.getActivitiesInStage(stage) }
+                .filter { activity -> activity is CaptureActivity || activity is MainActivity }
+                .distinct()
+                .filter { activity -> !activity.isFinishing && !activity.isDestroyed }
+                .forEach(Activity::finish)
+        }
+        instrumentation.waitForIdleSync()
+    }
+
     private fun shellOutput(command: String): String {
         val descriptor = InstrumentationRegistry.getInstrumentation()
             .uiAutomation
@@ -475,8 +568,9 @@ private class CountingSettingsRepository(initial: AppSettings) : SettingsReposit
 }
 
 private class CountingDocumentRepository(
-    private val parsedDays: List<ParsedDailyFile>,
+    parsedDays: List<ParsedDailyFile>,
 ) : DocumentRepository {
+    @Volatile private var parsedDays: List<ParsedDailyFile> = parsedDays
     val daysCalls = AtomicInteger()
 
     override suspend fun days(): List<ParsedDailyFile> {
@@ -496,6 +590,10 @@ private class CountingDocumentRepository(
 
     override suspend fun uncheckedCount(): Int =
         parsedDays.sumOf { day -> day.entries.count { entry -> !entry.processed } }
+
+    fun replaceDays(days: List<ParsedDailyFile>) {
+        parsedDays = days
+    }
 }
 
 private class CountingRecoveryStore(recoveryText: String) : RecoveryDraftStore {

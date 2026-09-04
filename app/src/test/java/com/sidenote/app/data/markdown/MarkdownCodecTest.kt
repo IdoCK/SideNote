@@ -9,6 +9,25 @@ class MarkdownCodecTest {
     private val codec = MarkdownCodec()
 
     @Test
+    fun fencedAndHtmlExampleTasksAreNotEditableAndValidCheckboxPreservesTheirBytes() {
+        val source = "# 2026-08-27\n\n```markdown\n- [ ] **09:00** example\n```\n" +
+            "~~~\n- [ ] **10:00** another example\n~~~\n<!--\n- [ ] **11:00** comment\n-->\n" +
+            "Prose and - [ ] malformed\n\n- [ ] **12:00** actual\n"
+        val parsed = codec.parse(LocalDate.parse("2026-08-27"), source)
+        assertThat(parsed.entries.map { it.text }).containsExactly("actual")
+        assertThat(codec.rewriteProcessed(source, parsed.entries.single().source, true))
+            .isEqualTo(RewriteResult.Updated(source.replace("- [ ] **12:00**", "- [x] **12:00**")))
+    }
+
+    @Test
+    fun unclosedFenceCannotExposeTasksAndForgedFenceSourceCannotBeRewritten() {
+        val source = "```\n- [ ] **09:00** example\n"
+        assertThat(codec.parse(LocalDate.parse("2026-08-27"), source).entries).isEmpty()
+        assertThat(codec.rewriteProcessed(source, EntrySource(4, "- [ ] **09:00** example", 0), true))
+            .isEqualTo(RewriteResult.Conflict)
+    }
+
+    @Test
     fun createsHeaderAndFormatsMultilineCapture() {
         val result = codec.appendEntry(
             codec.createDailyFile(LocalDate.parse("2026-08-27")),

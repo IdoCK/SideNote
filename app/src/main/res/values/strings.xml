@@ -1,10 +1,19 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="shortcut_review_short_label">Review</string>
+    <string name="shortcut_review_long_label">Review SideNote notes</string>
+    <string name="shortcut_review_disabled_message">Review is unavailable</string>
+    <string name="capture_recovery_unreadable">The previous draft could not be read. Retry recovery or deliberately discard it before starting another.</string>
+    <string name="capture_retry_recovery">Retry recovery</string>
+    <string name="capture_recovery_write_failed">Temporary recovery is unavailable. Keep this capture open, or finish to save directly to your notes folder.</string>
     <string name="capture_placeholder">Enter thought here…</string>
     <string name="voice_input_on">Voice input on</string>
     <string name="voice_input_off">Voice input off</string>
     <string name="discard">Discard</string>
     <string name="capture_save_failed">Could not save. Your draft is kept; restore folder access in Settings and try again.</string>
+    <string name="capture_save_and_recovery_failed">Could not save to your notes folder, and temporary recovery is unavailable. Keep this screen open while you restore folder access and retry.</string>
+    <string name="capture_save_uncertain">Android could not confirm the folder update. Your draft and recovery copy are still here; check the Markdown file before trying again.</string>
+    <string name="capture_save_uncertain_without_recovery">Android could not confirm the folder update, and temporary recovery is unavailable. Keep this screen open and inspect the Markdown file before retrying.</string>
     <string name="capture_voice_unavailable">Voice is unavailable. You can keep typing.</string>
     <string name="capture_saved">Saved · %1$s</string>
     <string name="capture_discarded">Discarded</string>

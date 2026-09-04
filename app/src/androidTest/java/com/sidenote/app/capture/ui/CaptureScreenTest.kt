@@ -50,6 +50,7 @@ import com.sidenote.app.data.documents.DocumentRepository
 import com.sidenote.app.data.documents.UpdateResult
 import com.sidenote.app.data.markdown.EntrySource
 import com.sidenote.app.data.markdown.ParsedDailyFile
+import com.sidenote.app.data.markdown.ProjectToken
 import com.sidenote.app.data.recovery.RecoveryDraft
 import com.sidenote.app.data.recovery.RecoveryDraftStore
 import com.sidenote.app.data.recovery.RecoveryLoadResult
@@ -280,6 +281,35 @@ class CaptureScreenTest {
     }
 
     @Test
+    fun markdownDerivedSuggestionReplacesTheActivePrefixWithoutLosingTextFieldState() {
+        var edited: TextFieldValue? = null
+        setContent {
+            CaptureScreen(
+                state = CaptureState(
+                    draft = TextFieldValue(
+                        text = "Plan @ho then more",
+                        selection = TextRange(8),
+                        composition = TextRange(14, 18),
+                    ),
+                    projectSuggestions = listOf(ProjectToken("home", "Home")),
+                ),
+                onTextChanged = { edited = it },
+                onVoiceToggle = {},
+                onDiscard = {},
+            )
+        }
+
+        compose.onNodeWithTag("$PROJECT_SUGGESTION_TAG_PREFIX.home")
+            .assertIsDisplayed()
+            .performClick()
+        compose.runOnIdle {
+            assertThat(edited?.text).isEqualTo("Plan @Home then more")
+            assertThat(edited?.selection).isEqualTo(TextRange(10))
+            assertThat(edited?.composition).isEqualTo(TextRange(16, 20))
+        }
+    }
+
+    @Test
     fun wrappedProjectChipsAndWritingCardStayInsideCaptureWidth() {
         val projects = listOf(
             "AlphaProject",
@@ -321,11 +351,13 @@ class CaptureScreenTest {
 
     @Test
     fun fontScaleTwoKeepsCaptureContentWithinTheVisibleRoot() {
+        var effectiveFontScale: Float? = null
         setContent {
             val density = LocalDensity.current
             CompositionLocalProvider(
                 LocalDensity provides Density(density.density, fontScale = 2f),
             ) {
+                effectiveFontScale = LocalDensity.current.fontScale
                 CaptureScreen(
                     state = CaptureState(
                         draft = TextFieldValue(
@@ -353,6 +385,7 @@ class CaptureScreenTest {
         assertContained(discard, root)
         assertThat(textLayout.getLineBottom(textLayout.lineCount - 1))
             .isAtMost(input.height)
+        compose.runOnIdle { assertThat(effectiveFontScale).isEqualTo(2f) }
     }
 
     private fun textLayoutResult(): TextLayoutResult {

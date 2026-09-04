@@ -17,6 +17,9 @@ sealed interface WriteOutcome {
 
     data object Conflict : WriteOutcome
 
+    /** A provider operation may have mutated storage, but the final state was not confirmable. */
+    data class Uncertain(val error: RepositoryError) : WriteOutcome
+
     data class Failure(val error: RepositoryError) : WriteOutcome
 }
 

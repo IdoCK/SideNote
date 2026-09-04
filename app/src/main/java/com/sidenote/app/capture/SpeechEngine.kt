@@ -70,6 +70,7 @@ internal class SpeechAttemptPolicy(
             SpeechFailure.Network,
             SpeechFailure.Server,
             SpeechFailure.LanguageUnavailable,
+            SpeechFailure.LanguageNotSupported,
         )
     }
 }

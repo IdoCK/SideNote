@@ -31,6 +31,8 @@ sealed interface AppendResult {
 
     data object Conflict : AppendResult
 
+    data class Uncertain(val error: RepositoryError) : AppendResult
+
     data class Failure(val error: RepositoryError) : AppendResult
 }
 
@@ -38,6 +40,8 @@ sealed interface UpdateResult {
     data object Success : UpdateResult
 
     data object Conflict : UpdateResult
+
+    data class Uncertain(val error: RepositoryError) : UpdateResult
 
     data class Failure(val error: RepositoryError) : UpdateResult
 }

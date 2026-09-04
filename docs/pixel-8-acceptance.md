@@ -1,10 +1,10 @@
-# SideNote MVP acceptance — 2026-09-03
+# SideNote MVP acceptance — 2026-09-04
 
 ## Scope and status
 
-Automation runs on `Pixel_8_API_37` **AVD**, Android 17 / API 37. It is not a physical Pixel 8. The physical acceptance gate is **PENDING: 0/7 executed, 7 NOT RUN**. No physical Android build number or physical Markdown evidence has been collected. The final 2026-09-03 `adb devices -l` recheck still returned only `emulator-5554` (`sdk_gphone64_x86_64`). Emulator-only fingerprint: `google/sdk_gphone64_x86_64/emu64xa:17/CE2A.260420.019/15611780:userdebug/dev-keys`.
+Automation runs on `Pixel_8_API_37` **AVD**, Android 17 / API 37. It is not a physical Pixel 8. The physical acceptance gate is **PENDING: 0/7 executed, 7 NOT RUN**. No physical Android build number or physical Markdown evidence has been collected. The final 2026-09-04 `adb devices -l` recheck returned only `emulator-5554` (`sdk_gphone64_x86_64`). Emulator-only fingerprint: `google/sdk_gphone64_x86_64/emu64xa:17/CE2A.260420.019/15611780:userdebug/dev-keys`.
 
-The automated clean gate **PASSED**. The APK is a debug build, not a signed production release; the complete physical MVP acceptance remains pending.
+The automated release gate **PASSED**. The APK is a debug build, not a signed production release; the complete physical MVP acceptance remains pending.
 
 ## Automated evidence
 
@@ -17,19 +17,19 @@ Required clean gate:
 ./gradlew.bat clean testDebugUnitTest lintDebug assembleDebug connectedDebugAndroidTest
 ```
 
-Final clean run: **exit 0**, `BUILD SUCCESSFUL in 7m 15s`; **83 actionable tasks, 83 executed**. XML reports confirm **154 unit + 69 instrumentation tests**, **0 failures, 0 errors, 0 skipped**. This includes 15 new end-to-end/accessibility cases and the architecture unit guard. Android lint: **0 errors, 14 warnings** (11 dependency/tool version notices, the existing missing application icon, and two version-catalog suggestions). No lint suppressions or baseline were added. Existing compiler/native-library notices: deprecated Compose test API in `AppLaunchTest`, and two native libraries packaged without symbol stripping.
+The final wave's clean invocation rebuilt all outputs from scratch. Its JVM, lint-analysis, and APK stages passed, with **186 unit tests**, **0 failures, 0 errors, 0 skipped**; its first device pass exposed two test synchronization failures at 79/81 and therefore the combined command exited 1 after 8m 39s. The fixes changed instrumentation synchronization only. Focused reruns then passed **2/2** and both complete affected classes passed **19/19**. The single full post-fix device run passed **81/81**, **0 failures, 0 errors, 0 skipped**, `BUILD SUCCESSFUL in 9m 13s`. The standard connected-test XML reported those 81 results; a final focused **1/1** run, added to assert the effective 2× Activity font scale explicitly, passed in 25s and subsequently replaced the ignored working-tree XML.
 
-APK verified at `app/build/outputs/apk/debug/app-debug.apk`, **33,608,358 bytes**. SHA-256:
+The final `lintDebug` report passed in 14s with **0 errors and 16 warnings**: 11 dependency/tool version notices, the existing missing application icon, two version-catalog suggestions, one Compose modifier-order suggestion, and one SharedPreferences KTX suggestion. No lint suppressions or baseline were added. Existing compiler/native-library notices remain: deprecated Compose test API in `AppLaunchTest`, and two native libraries packaged without symbol stripping.
+
+APK verified at `app/build/outputs/apk/debug/app-debug.apk`, **33,711,761 bytes**. SHA-256:
 
 ```text
-D4A8E675D906497409B5643356476FDF182493ADB472FEA5C6AFAE5433F71877
+1EE0297A074DB779A0F4BBB41C41022FC05FB697F63D2F11679A757135BFBDD2
 ```
 
-Generated evidence: `app/build/test-results/testDebugUnitTest/TEST-*.xml`, `app/build/outputs/androidTest-results/connected/debug/TEST-Pixel_8_API_37(AVD) - 17-_app-.xml`, and `app/build/reports/lint-results-debug.xml`. These build artifacts are intentionally ignored in Git. The first clean run had all tests passing but stopped on a test-fixture StateFlow lint error; that fixture was corrected and the exact clean gate rerun successfully.
+Generated evidence: `app/build/test-results/testDebugUnitTest/TEST-*.xml`, `app/build/outputs/androidTest-results/connected/debug/TEST-Pixel_8_API_37(AVD) - 17-_app-.xml`, and `app/build/reports/lint-results-debug.xml`. These build artifacts are intentionally ignored in Git. Counts and command outcomes above distinguish the full run from the later focused XML replacement rather than presenting the focused artifact as a full-suite report.
 
-Final pre-commit repeat, `./gradlew.bat testDebugUnitTest lintDebug assembleDebug connectedDebugAndroidTest`: **exit 0**, `BUILD SUCCESSFUL in 7m 9s`; **82 tasks: 2 executed, 80 up-to-date**. All **69 instrumentation tests re-executed and passed**; unit/lint/build outputs were up to date from the clean run. `git diff --check` and the staged diff check passed.
-
-The new end-to-end fixtures run the actual Capture/Main Activities, ViewModels, Markdown repository/codec, SAF store, `ContentResolver`, and file-backed `DocumentsProvider`. Assertions independently open the provider's UTF-8 documents and compare complete literal strings; they do not ask a repository mock what was saved. Clock, external speech callbacks, completion events, settings inputs, and lock state are controlled. Recovery uses the production atomic-file store. Provider-write failure is injected before truncation; arbitrary provider power loss mid-write is not certified.
+The end-to-end fixtures run the actual Capture/Main Activities, ViewModels, Markdown repository/codec, SAF store, `ContentResolver`, and file-backed `DocumentsProvider`. Assertions independently open the provider's UTF-8 documents and compare complete literal strings; they do not ask a repository mock what was saved. Clock, external speech callbacks, completion events, settings inputs, and lock state are controlled. Recovery uses the production atomic-file store. Provider faults are injected before staging and after rename mutations to verify confirmed, rejected, and uncertain classifications; arbitrary hardware power loss and provider contract violations are not certified.
 
 Literal integration coverage: typed Hebrew capture followed by checkbox processing; voice partial/final merged with typing; simultaneous completion signals; failed write, recovery relaunch and retry; cross-day case-insensitive project view with source-only checkbox update. Additional checks cover feedback, semantics, mixed bidi, 2× font size, reduced-motion rendering, non-gesture day controls, and reused-window content at the keyguard-dismissal request. Architecture tests scan production sources only for forbidden HTTP/analytics/note-database/audio-recording dependencies.
 
