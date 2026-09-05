@@ -31,6 +31,14 @@ Focused acceptance gate (quote the `-P` argument in PowerShell):
 
 ## First run and everyday capture
 
+### Installable release APK
+
+Run `./gradlew.bat assembleRelease`, then `./scripts/sign-release.ps1` with `JAVA_HOME` and `ANDROID_HOME` set as above. This produces `releases/SideNote-1.0.apk`, verifies its signature and alignment, and uses a dedicated release key rather than the Android debug key. Send that APK to the phone and open it to install.
+
+The script creates the signing key once in ignored `.signing/`; never commit or share that directory. Its password is protected with Windows user encryption in `password.xml` (usable only by the same Windows account on this computer). Preserve the key and arrange a secure, portable password backup before migrating computers; losing either prevents signing compatible updates. Build artifacts are ignored too.
+
+If the debug app is already installed, finish any unsaved capture before uninstalling it to install the differently signed release. Shared-folder Markdown survives uninstall, but private recovery drafts and settings do not. Choose the same notes folder during setup. A signed release package does not imply physical Pixel acceptance is complete.
+
 Unlock the phone for setup. Choose a dedicated writable notes folder using Android's system folder picker, grant microphone/notification permissions as desired, and read the voice disclosure. Accepting it enables online fallback; **Allow online voice recognition** can be turned off in Settings. Check English/Hebrew support and request model downloads if offered. Typing remains usable when microphone permission or bilingual speech support is unavailable.
 
 The selected folder contains the authoritative notes. It is outside SideNote's private app storage, so uninstalling SideNote does not delete those documents; reinstall and choose the same folder to read them again. Provider availability, backups, and cloud synchronization are the folder provider's responsibility. Changing folders does not migrate existing notes. See [Android shared-document storage](https://developer.android.com/training/data-storage/shared/documents-files).
