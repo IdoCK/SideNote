@@ -196,19 +196,25 @@ class SafTextDocumentStore(
                 metadata.expectedHash != null &&
                     readDocument(it).contentHash() == metadata.expectedHash
             }
-            val completeStage = stage.takeIf { stageState == StageState.Complete }
             when (val target = findExact(root, metadata.targetName)) {
                 ExactDocument.Ambiguous -> false
                 ExactDocument.Missing -> when {
                     verifiedBackup != null ->
-                        restoreBackup(root, verifiedBackup, metadata, completeStage)
-                    metadata.expectedHash == null -> {
-                        // Creation had not produced an authoritative target. A complete stage
-                        // can be removed, while partial/unknown bytes remain hidden as an owned
-                        // quarantine artifact and are never promoted to Markdown truth.
-                        completeStage?.let(::deleteOwnedIfSupported)
-                        true
-                    }
+                        retireResolvedArtifact(
+                            root,
+                            stage,
+                            metadata,
+                            ArtifactKind.Stage,
+                            preserveBytes = stageState == StageState.Incomplete,
+                        ) && restoreBackup(root, verifiedBackup, metadata)
+                    metadata.expectedHash == null && backup == null ->
+                        retireResolvedArtifact(
+                            root,
+                            stage,
+                            metadata,
+                            ArtifactKind.Stage,
+                            preserveBytes = stageState == StageState.Incomplete,
+                        )
                     else -> false
                 }
                 is ExactDocument.Found -> {
@@ -216,12 +222,53 @@ class SafTextDocumentStore(
                     if (targetHash != metadata.expectedHash && targetHash != metadata.replacementHash) {
                         false
                     } else {
-                        verifiedBackup?.let(::deleteOwnedIfSupported)
-                        completeStage?.let(::deleteOwnedIfSupported)
-                        true
+                        retireResolvedArtifact(
+                            root,
+                            stage,
+                            metadata,
+                            ArtifactKind.Stage,
+                            preserveBytes = stageState == StageState.Incomplete,
+                        ) && retireResolvedArtifact(
+                            root,
+                            backup,
+                            metadata,
+                            ArtifactKind.Backup,
+                            preserveBytes = backup != null && verifiedBackup == null,
+                        )
                     }
                 }
             }
+        }
+    }
+
+    private fun retireResolvedArtifact(
+        root: DocumentFile,
+        document: DocumentFile?,
+        metadata: ArtifactMetadata,
+        kind: ArtifactKind,
+        preserveBytes: Boolean,
+    ): Boolean {
+        document ?: return true
+        val activeName = metadata.name(kind)
+        if (!preserveBytes && supports(document, DocumentsContract.Document.FLAG_SUPPORTS_DELETE)) {
+            runCatching { DocumentsContract.deleteDocument(contentResolver, document.uri) }
+            when (val remaining = findExact(root, activeName)) {
+                ExactDocument.Missing -> return true
+                ExactDocument.Ambiguous -> return false
+                is ExactDocument.Found -> if (!sameDocument(remaining.document.uri, document.uri)) {
+                    return false
+                }
+            }
+        }
+        if (!supports(document, DocumentsContract.Document.FLAG_SUPPORTS_RENAME)) return false
+        val quarantineName = metadata.quarantineName(kind)
+        if (findExact(root, quarantineName) != ExactDocument.Missing) return false
+        return try {
+            renameAndFind(root, document, quarantineName)
+            true
+        } catch (_: Exception) {
+            findExact(root, activeName) == ExactDocument.Missing &&
+                findExact(root, quarantineName) is ExactDocument.Found
         }
     }
 
@@ -229,17 +276,14 @@ class SafTextDocumentStore(
         root: DocumentFile,
         backup: DocumentFile,
         metadata: ArtifactMetadata,
-        stage: DocumentFile?,
     ): Boolean = try {
         if (!supports(backup, DocumentsContract.Document.FLAG_SUPPORTS_RENAME)) return false
         val restored = renameAndFind(root, backup, metadata.targetName)
         if (readDocument(restored).contentHash() != metadata.expectedHash) return false
-        stage?.let(::deleteOwnedIfSupported)
         true
     } catch (_: Exception) {
         val restored = findExact(root, metadata.targetName) as? ExactDocument.Found ?: return false
         if (readDocument(restored.document).contentHash() != metadata.expectedHash) return false
-        stage?.let(::deleteOwnedIfSupported)
         true
     }
 
@@ -292,6 +336,14 @@ class SafTextDocumentStore(
             append('.')
             append(kind.suffix)
         }
+    }
+
+    private fun ArtifactMetadata.quarantineName(kind: ArtifactKind): String = buildString {
+        append(artifactPrefix())
+        append("quarantine.")
+        append(transactionId)
+        append('.')
+        append(kind.suffix)
     }
 
     private fun artifactPrefix(): String = ".sidenote-$ownerToken."

@@ -177,6 +177,7 @@ class SafTextDocumentStoreTest {
 
     @Test
     fun emptyUndeletableStageDoesNotBlockMissingNewTarget() = runTest {
+        val nextReplacement = "# 2026-08-27\n\n- [ ] **10:00** Later write\n"
         TestDocumentsProvider.supportDelete(context.contentResolver, false)
         TestDocumentsProvider.failWrites(context.contentResolver, true)
 
@@ -188,12 +189,22 @@ class SafTextDocumentStoreTest {
 
         assertThat(store.read("2026-08-27.md")).isNull()
         assertThat(store.listNames()).isEmpty()
-        assertThat(readRaw(stage)).isEmpty()
+        assertThat(store.writeAtomically("2026-08-27.md", null, nextReplacement))
+            .isEqualTo(WriteOutcome.Success)
+
+        val reopened = SafTextDocumentStore(context, TestDocumentsProvider.treeUri())
+        repeat(2) {
+            assertThat(reopened.read("2026-08-27.md")).isEqualTo(nextReplacement)
+            assertThat(reopened.listNames()).containsExactly("2026-08-27.md")
+        }
+        assertThat(inactiveQuarantines().map(::readRaw)).contains("")
+        assertThat(activeArtifacts()).isEmpty()
     }
 
     @Test
     fun incompleteUndeletableStageDoesNotBlockVerifiedOriginal() = runTest {
         val original = "# 2026-08-27\n\n- [ ] **08:00** Original\n"
+        val nextReplacement = "# 2026-08-27\n\n- [x] **08:00** Later replacement\n"
         assertThat(store.writeAtomically("2026-08-27.md", null, original))
             .isEqualTo(WriteOutcome.Success)
         TestDocumentsProvider.supportDelete(context.contentResolver, false)
@@ -205,13 +216,23 @@ class SafTextDocumentStoreTest {
 
         assertThat(store.read("2026-08-27.md")).isEqualTo(original)
         assertThat(store.listNames()).containsExactly("2026-08-27.md")
-        assertThat(readRaw(ownedArtifact(".stage"))).isEmpty()
+        assertThat(store.writeAtomically("2026-08-27.md", original, nextReplacement))
+            .isEqualTo(WriteOutcome.Success)
+
+        val reopened = SafTextDocumentStore(context, TestDocumentsProvider.treeUri())
+        repeat(2) {
+            assertThat(reopened.read("2026-08-27.md")).isEqualTo(nextReplacement)
+            assertThat(reopened.listNames()).containsExactly("2026-08-27.md")
+        }
+        assertThat(inactiveQuarantines().map(::readRaw)).contains("")
+        assertThat(activeArtifacts()).isEmpty()
     }
 
     @Test
     fun partialStageAllowsVerifiedBackupRestoreWhenTargetIsMissing() = runTest {
         val original = "# 2026-08-27\n\n- [ ] **08:00** Original\n"
         val replacement = "# 2026-08-27\n\n- [x] **08:00** Original\n"
+        val nextReplacement = "# 2026-08-27\n\n- [x] **11:00** Later replacement\n"
         assertThat(store.writeAtomically("2026-08-27.md", null, original))
             .isEqualTo(WriteOutcome.Success)
         TestDocumentsProvider.supportDelete(context.contentResolver, false)
@@ -223,7 +244,16 @@ class SafTextDocumentStoreTest {
 
         assertThat(store.read("2026-08-27.md")).isEqualTo(original)
         assertThat(store.listNames()).containsExactly("2026-08-27.md")
-        assertThat(readRaw(stage)).isEqualTo("partial replacement")
+        assertThat(store.writeAtomically("2026-08-27.md", original, nextReplacement))
+            .isEqualTo(WriteOutcome.Success)
+
+        val reopened = SafTextDocumentStore(context, TestDocumentsProvider.treeUri())
+        repeat(2) {
+            assertThat(reopened.read("2026-08-27.md")).isEqualTo(nextReplacement)
+            assertThat(reopened.listNames()).containsExactly("2026-08-27.md")
+        }
+        assertThat(inactiveQuarantines().map(::readRaw)).contains("partial replacement")
+        assertThat(activeArtifacts()).isEmpty()
     }
 
     @Test
@@ -249,10 +279,24 @@ class SafTextDocumentStoreTest {
         assertThat(readRaw(target)).isEqualTo(external)
         assertThat(ownedArtifact(".backup")).isNotNull()
         assertThat(readRaw(ownedArtifact(".stage"))).isEqualTo("partial replacement")
+        assertThat(rawRoot().listFiles().none { it.name?.contains(".quarantine.") == true })
+            .isTrue()
     }
 
     private fun ownedArtifact(suffix: String): DocumentFile = rawRoot().listFiles().single {
-        it.name?.startsWith(".sidenote-") == true && it.name?.endsWith(suffix) == true
+        it.name?.startsWith(".sidenote-") == true &&
+            it.name?.contains(".quarantine.") == false &&
+            it.name?.endsWith(suffix) == true
+    }
+
+    private fun inactiveQuarantines(): List<DocumentFile> = rawRoot().listFiles().filter {
+        it.name?.startsWith(".sidenote-") == true &&
+            it.name?.contains(".quarantine.") == true
+    }
+
+    private fun activeArtifacts(): List<DocumentFile> = rawRoot().listFiles().filter {
+        it.name?.startsWith(".sidenote-") == true &&
+            it.name?.contains(".quarantine.") == false
     }
 
     private fun rawRoot(): DocumentFile = checkNotNull(
