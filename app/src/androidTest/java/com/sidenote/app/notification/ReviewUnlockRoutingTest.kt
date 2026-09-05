@@ -331,7 +331,9 @@ class ReviewUnlockRoutingTest {
         try {
             if (wasDisabled) executeShellCommand("locksettings set-disabled false")
             executeShellCommand("input keyevent KEYCODE_SLEEP")
-            waitUntil(timeoutMillis = 5_000) { keyguardManager().isKeyguardLocked }
+            // Enabling the credential-free keyguard and putting the emulator to sleep are
+            // asynchronous system-server transitions; API 37 can take more than five seconds.
+            waitUntil(timeoutMillis = 10_000) { keyguardManager().isKeyguardLocked }
 
             val realLockState = AndroidLockState(targetContext)
             realLockState.refresh()
