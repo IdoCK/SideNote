@@ -2,8 +2,8 @@
 
 Date: 2026-09-04
 Reviewed base: `4f5b405`
-Scope: all 13 findings and the three required minor improvements in `final-fix-brief.md`
-Status: implemented and automated gates complete; physical Pixel acceptance remains pending
+Scope: all 13 findings and the three required minor improvements in `final-fix-brief.md`, plus the controller-approved scoped residual correction
+Status: implemented; final scoped gates complete, latest full-device attempt explicitly incomplete, and physical Pixel acceptance pending
 
 ## Evidence provenance
 
@@ -18,6 +18,8 @@ The recoverable task record did retain several later, directly observed REDs whi
 - the final clean attempt exposed two synchronization failures: stale text selection during IME injection and an off-main fake keyguard callback. The exact two cases passed 2/2, the two complete classes passed 19/19, and the subsequent full device run passed 81/81.
 
 All production behavior is still asserted by exact outcomes; the synchronization changes do not loosen literal text, exactly-once repository scans, pre-unlock zero-read assertions, or activity privacy assertions.
+
+The first scoped review of commit `643cb4e` found three remaining boundaries. Their RED/GREEN evidence was captured directly: two queued-lock suggestion tests failed before the repository-read guard; two clear-after-append tests failed because cleanup escaped or exposed the committed mirror to the next session; and three incomplete-stage SAF cases failed before authoritative target/backup evaluation. Review of the first correction commit `b7def71` then found that a retained incomplete stage still carried active transaction hashes and could block a later valid write. The extended fresh-store continuation tests failed 3/13 at that later read, then passed after resolved artifacts were retired to inactive quarantine in `20b20c8`.
 
 ## Finding resolutions
 
@@ -65,17 +67,17 @@ GREEN: `installedOnlyLanguagesAreReadyButDownloadableOnlyAreNot`, `localUnsuppor
 
 ### 7. Cancellation at the I/O return boundary
 
-Capture recovery reconciliation now belongs to a process-scoped `CaptureRecoveryHandoff`. It mirrors the exact draft, appends under the shared completion transaction, and clears only after confirmed success even if the host ViewModel is cleared after the underlying write and before the dispatcher returns. New capture sessions queue behind the same handoff. UI work remains cancellable; there is no unbounded `NonCancellable` block.
+Capture recovery reconciliation now belongs to a process-scoped `CaptureRecoveryHandoff`. It mirrors the exact draft, appends under the shared completion transaction, and clears only after confirmed success even if the host ViewModel is cleared after the underlying write and before the dispatcher returns. If that post-commit clear fails, the handoff records process-local cleanup ownership, suppresses the known-committed mirror from the next session, and retries clear before later loads. New capture sessions queue behind the same handoff. UI work remains cancellable; there is no unbounded `NonCancellable` block.
 
 Reconstructed RED: cancellation of the ViewModel-owned `withContext(IO)` return could discard a committed result and leave recovery available for a duplicate retry.
-GREEN: `clearingHostAfterWriteBeforeIoReturnStillReconcilesRecovery` and `terminalSpeechDuringCompletionReachesCoordinatorWithoutEventMutexDeadlock`.
+GREEN: `clearingHostAfterWriteBeforeIoReturnStillReconcilesRecovery`, `failedPostCommitClearIsMaskedFromNextSessionAndRetried`, and `terminalSpeechDuringCompletionReachesCoordinatorWithoutEventMutexDeadlock`.
 
 ### 8. Recovery persistence failures
 
-`RecoveryDraftWriter` contains debounce and flush exceptions, reports mirror health to the in-memory capture state, and can cancel a pending debounce before clear. Explicit Markdown completion is still allowed when the temporary mirror fails; confirmed Markdown success clears recovery, while Markdown failure/uncertainty leaves the in-memory draft visible with combined accessible guidance. A finishing host transfers flush ownership to the process scope before awaiting UI feedback.
+`RecoveryDraftWriter` contains debounce and flush exceptions, reports mirror health to the in-memory capture state, and can cancel a pending debounce before clear. Explicit Markdown completion is still allowed when the temporary mirror fails; confirmed Markdown success remains `Saved` even if subsequent recovery cleanup throws, while Markdown failure/uncertainty leaves the in-memory draft visible with combined accessible guidance. A finishing host transfers flush ownership to the process scope before awaiting UI feedback.
 
 Reconstructed RED: debounce/flush exceptions escaped the writer and could prevent a writable SAF completion; a delayed write could also recreate recovery after clear. Directly observed REDs are listed under evidence provenance.
-GREEN: `throwingDebounceAndFlushAreRecoverableRatherThanUnhandled`, `cancelPendingDropsTheDebouncedWriteWithoutPersistingIt`, `failedTemporaryMirrorDoesNotPreventExplicitMarkdownCompletion`, `immediateCompletionSurfacesMirrorFailureWhenMarkdownAlsoCannotBeSaved`, `finishingStopFlushSurvivesViewModelClearing`, and the combined polite-error assertions in `AccessibilityAndBidiTest`.
+GREEN: `throwingDebounceAndFlushAreRecoverableRatherThanUnhandled`, `cancelPendingDropsTheDebouncedWriteWithoutPersistingIt`, `failedTemporaryMirrorDoesNotPreventExplicitMarkdownCompletion`, `immediateCompletionSurfacesMirrorFailureWhenMarkdownAlsoCannotBeSaved`, `recoveryClearFailureAfterConfirmedAppendStillReportsSavedTruth`, `finishingStopFlushSurvivesViewModelClearing`, and the combined polite-error assertions in `AccessibilityAndBidiTest`.
 
 ### 9. External Markdown
 
@@ -93,10 +95,10 @@ GREEN: `oneCoalescedReentryRefreshLoadsExternalAddEditAndDelete`, `reentryRefres
 
 ### 11. Approved discovery affordances
 
-After explicit unlock, Capture derives project suggestions from current Markdown and replaces only the active `@prefix`, retaining unrelated text and valid selection/composition state. Locking clears suggestions and prevents the history scan. Review now includes a scrollable 120-day date browser and horizontal day swipe while retaining accessible Previous/Next buttons and source-day navigation.
+After explicit unlock, Capture derives project suggestions from current Markdown and replaces only the active `@prefix`, retaining unrelated text and valid selection/composition state. Locking cancels queued scans, clears suggestions, and rechecks access/generation on the I/O dispatcher immediately before `days()`, so a known-locked transition cannot read history merely because an unlocked coroutine was already queued. Review includes a scrollable 120-day date browser and horizontal day swipe while retaining accessible Previous/Next buttons and source-day navigation.
 
 Reconstructed RED: Capture had no project suggestions and Review exposed only single-step buttons rather than the approved browser/swipe affordances.
-GREEN: `projectSuggestionsNeverReadHistoryUntilUnlockedAndRefreshFromMarkdownSource`, `markdownDerivedSuggestionReplacesTheActivePrefixWithoutLosingTextFieldState`, `longDateBrowserAndHorizontalSwipeWorkAlongsideExplicitDayButtons`, and `fontScaleTwoWrapsAllChipsAndPreservesEditingSelectionAndComposition`. The last test waits for the requested selection to reach `TextFieldValue` before injecting the literal suffix, preventing IME commands from using the intentionally retained earlier selection.
+GREEN: `projectSuggestionsNeverReadHistoryUntilUnlockedAndRefreshFromMarkdownSource`, `lockingBeforeUnlockedScanCoroutineDispatchPreventsHistoryRead`, `lockingWhileUnlockedScanIsQueuedForIoPreventsHistoryRead`, `markdownDerivedSuggestionReplacesTheActivePrefixWithoutLosingTextFieldState`, `longDateBrowserAndHorizontalSwipeWorkAlongsideExplicitDayButtons`, and `fontScaleTwoWrapsAllChipsAndPreservesEditingSelectionAndComposition`. The last test waits for the requested selection to reach `TextFieldValue` before injecting the literal suffix, preventing IME commands from using the intentionally retained earlier selection.
 
 ### 12. Settings errors are visible
 
@@ -107,12 +109,12 @@ GREEN: `failedFolderRepairAndConsentWritesStayVisibleUntilASuccessfulRetry` and 
 
 ### 13. SAF uncertain writes and false claims
 
-The store no longer opens the authoritative target with truncating `wt`. It requires provider create+rename capabilities, creates a unique app-owned sibling stage, writes and verifies replacement bytes there, revalidates the target identity and expected content, renames an existing target to an app-owned backup, installs the stage, and verifies the installed bytes before cleanup. App artifacts encode a private owner token, transaction id, target, expected hash, and replacement hash. Recovery considers only verified owned artifacts, restores an owned backup only when the target is absent, never overwrites a conflicting target, and filters artifacts from note/project/status scans.
+The store no longer opens the authoritative target with truncating `wt`. It requires provider create+rename capabilities, creates a unique app-owned sibling stage, writes and verifies replacement bytes there, revalidates the target identity and expected content, renames an existing target to an app-owned backup, installs the stage, and verifies the installed bytes before cleanup. App artifacts encode a private owner token, transaction id, target, expected hash, and replacement hash. Recovery treats an empty/partial stage as untrusted rather than final, independently accepts a verified authoritative target or restores a valid backup, and never overwrites a conflicting target. Once a transaction is safely resolved, undeletable or untrusted artifacts are renamed to an app-owned hidden quarantine name that no longer parses as an active transaction, preserving bytes without allowing stale hashes to block later writes. Active and quarantined artifacts remain filtered from note/project/status scans.
 
 Outcomes now distinguish confirmed success, pre-mutation failure/conflict, and post-mutation `Uncertain`. Capture and Review retain recovery/context and avoid the false promise that the file was unchanged when a provider may have mutated it.
 
 Reconstructed RED: base `wt` could truncate before throwing while UI and README claimed unchanged/concurrency-safe behavior. Directly observed rename-after-mutation RED is listed under evidence provenance.
-GREEN: `stageWriteFailureLeavesExistingTargetUntouched`, `missingRenameCapabilityFailsClosedBeforeChangingOriginal`, `renameFailureAfterOriginalMutationIsUncertainAndNextReadRestoresOriginal`, `renameFailureAfterCreatingANewTargetIsUncertainRatherThanAFalseRejection`, `providerThrowAfterReplacementRenameRemainsUncertainButRecoveryKeepsReplacement`, `uncertainPostWriteOutcomeIsPreservedForCaptureAndCheckboxCallers`, and `uncertainCheckboxWriteDoesNotPromiseThatMarkdownWasUnchanged`.
+GREEN: `stageWriteFailureLeavesExistingTargetUntouched`, `emptyUndeletableStageDoesNotBlockMissingNewTarget`, `incompleteUndeletableStageDoesNotBlockVerifiedOriginal`, `partialStageAllowsVerifiedBackupRestoreWhenTargetIsMissing`, `partialStageAndValidBackupNeverOverwriteConflictingTarget`, `missingRenameCapabilityFailsClosedBeforeChangingOriginal`, `renameFailureAfterOriginalMutationIsUncertainAndNextReadRestoresOriginal`, `renameFailureAfterCreatingANewTargetIsUncertainRatherThanAFalseRejection`, `providerThrowAfterReplacementRenameRemainsUncertainButRecoveryKeepsReplacement`, `uncertainPostWriteOutcomeIsPreservedForCaptureAndCheckboxCallers`, and `uncertainCheckboxWriteDoesNotPromiseThatMarkdownWasUnchanged`. The first three recovery cases each continue through a different later successful replacement and repeated `read`/`listNames` calls from a fresh store instance.
 
 ## Required minor improvements
 
@@ -131,21 +133,27 @@ Environment:
 
 Commands and results:
 
-1. `gradlew.bat clean testDebugUnitTest lintDebug assembleDebug connectedDebugAndroidTest`
-   - all 81 tasks executed from clean output;
-   - JVM suite, lint analysis, and APK assembly passed;
-   - 186/186 JVM tests passed;
-   - device phase found the two synchronization REDs described above, so the combined invocation exited 1 after 8m 39s at 79/81.
-2. Exact two corrected device tests: 2/2 passed, `BUILD SUCCESSFUL in 31s`.
-3. Complete affected classes (`AccessibilityAndBidiTest`, `ReviewUnlockRoutingTest`): 19/19 passed, `BUILD SUCCESSFUL in 2m 51s`.
-4. `gradlew.bat :app:connectedDebugAndroidTest`: 81/81 passed, 0 failed, 0 errors, 0 skipped, `BUILD SUCCESSFUL in 9m 13s`.
-5. `gradlew.bat :app:lintDebug`: passed in 14s; XML contains 0 errors and 16 warnings. No baseline or suppression was added.
-6. The final added effective-font-scale assertion passed focused 1/1 in 25s. This focused run replaced the ignored connected-test XML after the full-run counts had been recorded; it did not change production or the APK.
+Original wave through commit `643cb4e`:
 
-Final automated counts: **186 JVM + 81 full device**, all passing in their final applicable runs. The current debug APK is `app/build/outputs/apk/debug/app-debug.apk`, 33,711,761 bytes, SHA-256:
+1. `gradlew.bat clean testDebugUnitTest lintDebug assembleDebug connectedDebugAndroidTest` executed all 81 tasks from clean output. The 186-test JVM suite, lint analysis, and APK assembly passed; the device phase exposed two synchronization REDs and the command exited 1 at 79/81 after 8m 39s.
+2. The exact two corrected device tests passed 2/2 in 31s; complete affected classes (`AccessibilityAndBidiTest`, `ReviewUnlockRoutingTest`) passed 19/19 in 2m 51s.
+3. A complete post-fix device run passed 81/81 with 0 failures, errors, or skips in 9m 13s.
+4. `lintDebug` passed with 0 errors and 16 warnings. The final effective-2×-font assertion then passed focused 1/1 in 25s.
+
+Scoped residual correction (`b7def71`, then `20b20c8`):
+
+1. `CaptureViewModelTest`: the two new queued-lock regressions failed before production changes, then the complete class passed 16/16 in 8s.
+2. `CaptureCoordinatorTest` + `CaptureRecoveryHandoffTest`: the two clear-after-confirmed-append regressions failed before production changes, then both classes passed 39/39 in 8s.
+3. `SafTextDocumentStoreTest`: three new incomplete-stage recovery cases failed before production changes; the complete class then passed 13/13. The follow-up continuation extension failed 3/13 on `b7def71` at the fresh-store read after a later successful write. At `20b20c8`, the complete class passed 13/13 in 23s, including repeated fresh-store reads/lists and the conflicting-target preservation case.
+4. A clean checkpoint invocation at `b7def71` completed compilation, 190/190 JVM tests, and APK assembly. Its device phase was stopped as obsolete at 55/85 after two failures: `AccessibilityAndBidiTest.reusedWindowContainsOnlyUnlockSemanticsAtTheActualDismissalRequest` (unlock node not displayed) and `AccessibilityAndBidiTest.recoverableOnboardingErrorIsMonochromeAndAnnouncedPolitely` (`PixelCopy` timeout). This is an incomplete/failed device attempt, not a passing full gate and not attributed to an environmental cause without proof.
+5. Per the controller-adjusted final scope, no second slow full-device suite was scheduled solely for the isolated storage continuation. At final code revision `20b20c8`, `gradlew.bat testDebugUnitTest lintDebug assembleDebug` passed in 42s: 190/190 JVM tests, 0 failures/errors/skips; lint 0 errors and 16 warnings; APK assembly successful. The complete applicable SAF device class is the 13/13 result above.
+
+Current automated evidence is therefore **190 JVM tests passing**, **13/13 final scoped SAF device tests passing**, and the earlier complete **81/81** full-device run at `643cb4e`. A complete 85-case device run at the final correction revision was not executed. The current connected XML contains the final focused 13-case SAF class, not a full-suite result.
+
+The current debug APK is `app/build/outputs/apk/debug/app-debug.apk`, 33,803,407 bytes, SHA-256:
 
 ```text
-1EE0297A074DB779A0F4BBB41C41022FC05FB697F63D2F11679A757135BFBDD2
+826D1B7165709724A494EC666AA7F3384131A103005A9D0A1B3E59665B2EF931
 ```
 
 Official primary references used to check platform boundaries:
@@ -160,6 +168,8 @@ Official primary references used to check platform boundaries:
 ## Residual limitations and acceptance boundary
 
 - Generic SAF still has no cross-provider compare-and-swap or universal atomic-replace guarantee. An external writer can race after SideNote's last validation, and a provider can misreport or violate create/rename behavior. SideNote therefore fails closed when required capabilities are absent, reports ambiguous post-mutation outcomes as uncertain, and preserves verified owned stage/backup plus app-private recovery material for retry/inspection. README states this limit explicitly.
+- The post-commit recovery-cleanup marker is process-local under the approved temporary recovery architecture. It prevents a known committed mirror from duplicating a capture in the next session while the process survives, but process death after confirmed Markdown append and before a successful recovery clear can still resurrect that mirror because the recovery file has no durable commit transaction id. Closing that gap requires durable transaction metadata rather than inference from draft text.
+- Incomplete/unknown SAF stage bytes are preserved under a hidden inactive quarantine name. Providers that permit rename but not delete can accumulate these hidden artifacts. If a provider permits neither deletion nor rename of an incomplete artifact, SideNote cannot safely retire it and remains fail-closed rather than discarding unknown bytes or treating them as final content.
 - Providers lacking the required sibling create/rename behavior are intentionally unsupported for writes rather than being silently downgraded to truncation.
 - The APK is a debug build, not a signed production release.
 - Only the AVD was available. Physical Pixel acceptance is **0/7 executed, 7 NOT RUN**. Quick Tap delivery, real keyguard frames, OEM speech behavior/accuracy, sensor false positives, TalkBack speech, and haptic perceptibility remain physical checks.
