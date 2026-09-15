@@ -84,6 +84,9 @@ class CaptureViewModel(
     )
 
     @Volatile private var captureActive = false
+    private var recognitionRunning = false
+    private var transientSpeechRetries = 0
+    private var speechSupportReady = false
     @Volatile private var setupInFlight = false
     @Volatile private var backgroundCompletionArmed = false
     @Volatile private var projectSuggestionAccess = false
@@ -182,10 +185,9 @@ class CaptureViewModel(
     }
 
     fun onCaptureStarted() {
+        val lifecycleGeneration = if (captureActive) captureLifecycleGeneration else ++captureLifecycleGeneration
         captureActive = true
-        val lifecycleGeneration = ++captureLifecycleGeneration
-        speechStartupJob?.cancel()
-        speechStartupJob = viewModelScope.launch {
+        viewModelScope.launch {
             val currentCoordinator = awaitCoordinator() ?: return@launch
             eventMutex.withLock {
                 if (
@@ -201,6 +203,7 @@ class CaptureViewModel(
 
     fun onCaptureStopped(completeIfBackgrounded: Boolean) {
         captureActive = false
+        recognitionRunning = false
         captureLifecycleGeneration += 1
         speechStartupJob?.cancel()
         speechStartupJob = null
@@ -326,12 +329,19 @@ class CaptureViewModel(
     }
 
     fun onVoiceToggle() {
+        transientSpeechRetries = 0
         mutateDraft { currentCoordinator -> currentCoordinator.onVoiceToggle() }
         viewModelScope.launch {
             val currentCoordinator = awaitCoordinator() ?: return@launch
             eventMutex.withLock {
                 startSpeechIfEligible(currentCoordinator)
             }
+        }
+    }
+
+    fun onVoicePause() {
+        mutateDraft { current ->
+            if (current.state.value.voiceEnabled) current.onVoiceToggle()
         }
     }
 
@@ -372,6 +382,9 @@ class CaptureViewModel(
         signal: CompletionSignal,
     ) {
         if (recoveryUnreadable) return
+        speechStartupJob?.cancel()
+        speechStartupJob = null
+        speechRestartJob?.cancel()
         // Completion owns the durable mirror + append + clear transaction. A delayed
         // debounce must not run after that clear and resurrect a completed draft.
         recoveryWriter?.cancelPending()
@@ -407,6 +420,13 @@ class CaptureViewModel(
                 val before = currentCoordinator.state.value
                 mutation(currentCoordinator)
                 val after = currentCoordinator.state.value
+                if (before.voiceEnabled && !after.voiceEnabled) {
+                    speechSessionGeneration.incrementAndGet()
+                    recognitionRunning = false
+                    speechStartupJob?.cancel()
+                    speechStartupJob = null
+                    speechRestartJob?.cancel()
+                }
                 if (after != before && after.status != CaptureStatus.Saving) {
                     recoveryWriter?.onDraftChanged(after.toRecoveryDraft())
                 }
@@ -414,30 +434,66 @@ class CaptureViewModel(
         }
     }
 
-    private suspend fun startSpeechIfEligible(currentCoordinator: CaptureCoordinator) {
+    private fun startSpeechIfEligible(currentCoordinator: CaptureCoordinator) {
         val current = currentCoordinator.state.value
         if (
             !captureActive ||
+            recognitionRunning ||
+            speechStartupJob?.isActive == true ||
             terminalCompletion ||
             !current.voiceEnabled ||
             current.status != CaptureStatus.Ready
         ) {
             return
         }
-        val available = withTimeoutOrNull(3000L) { speech?.support() }
-        if (!captureActive || !currentCoordinator.state.value.voiceEnabled || terminalCompletion) return
-        if (available != SpeechAvailability.Available) {
-            currentCoordinator.onSpeechFailure()
-            return
-        }
         val generation = speechSessionGeneration.incrementAndGet()
-        detectedLanguageTag = null
-        speech?.start(speechListener(generation))
+        val lifecycleGeneration = captureLifecycleGeneration
+        currentCoordinator.onSpeechPhase(VoicePhase.Starting)
+        // Provider IPC must never hold eventMutex: taps, typing and physical stop
+        // signals need to cancel startup immediately, even if the provider hangs.
+        speechStartupJob = viewModelScope.launch {
+            val available = try {
+                if (speechSupportReady) SpeechAvailability.Available
+                else withTimeoutOrNull(3000L) { speech?.support() }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (_: Exception) {
+                null
+            }
+            eventMutex.withLock {
+                if (!captureActive || lifecycleGeneration != captureLifecycleGeneration ||
+                    generation != speechSessionGeneration.get() || terminalCompletion ||
+                    !currentCoordinator.state.value.voiceEnabled ||
+                    currentCoordinator.state.value.status != CaptureStatus.Ready
+                ) return@withLock
+                if (available == null) {
+                    currentCoordinator.onSpeechPhase(VoicePhase.Retrying)
+                    restartAfterUtterance(generation, 1500L)
+                } else if (available != SpeechAvailability.Available) {
+                    currentCoordinator.onSpeechFailure()
+                } else {
+                    speechSupportReady = true
+                    detectedLanguageTag = null
+                    recognitionRunning = true
+                    speech?.start(speechListener(generation))
+                }
+            }
+        }
     }
 
     private fun speechListener(generation: Long) = object : SpeechEngine.Listener {
+        override fun onReady() {
+            mutateSpeech(generation) { it.onSpeechPhase(VoicePhase.Listening) }
+        }
+
+        override fun onProcessing() {
+            mutateSpeech(generation) { it.onSpeechPhase(VoicePhase.Processing) }
+        }
+
         override fun onPartial(text: String) {
             mutateSpeech(generation) { currentCoordinator ->
+                transientSpeechRetries = 0
+                currentCoordinator.onSpeechPhase(VoicePhase.Listening)
                 currentCoordinator.onSpeechPartial(text)
             }
         }
@@ -447,7 +503,10 @@ class CaptureViewModel(
                 ?.let(Locale::forLanguageTag)
                 ?: Locale.getDefault()
             mutateSpeech(generation) { currentCoordinator ->
+                recognitionRunning = false
+                transientSpeechRetries = 0
                 currentCoordinator.onSpeechFinal(text, locale)
+                currentCoordinator.onSpeechStopped()
                 if (speechSessionGeneration.compareAndSet(generation, generation + 1)) {
                     restartAfterUtterance(generation + 1)
                 }
@@ -458,6 +517,18 @@ class CaptureViewModel(
             mutateRms(generation, normalizedRms)
         }
 
+        override fun onAudioFeatures(features: SpeechAudioFeatures) {
+            if (generation != speechSessionGeneration.get()) return
+            viewModelScope.launch {
+                val current = awaitCoordinator() ?: return@launch
+                eventMutex.withLock {
+                    if (!terminalCompletion && generation == speechSessionGeneration.get()) {
+                        current.onAudioFeatures(features)
+                    }
+                }
+            }
+        }
+
         override fun onDetectedLanguage(languageTag: String) {
             if (generation == speechSessionGeneration.get()) {
                 detectedLanguageTag = languageTag
@@ -466,21 +537,34 @@ class CaptureViewModel(
 
         override fun onUnavailable(failure: SpeechFailure) {
             mutateSpeech(generation) { currentCoordinator ->
+                recognitionRunning = false
                 val ordinarySilence = failure == SpeechFailure.NoMatch ||
                     failure == SpeechFailure.SpeechTimeout
-                if (ordinarySilence) currentCoordinator.onSpeechStopped()
+                val retryTransient = failure in setOf(
+                    SpeechFailure.Busy, SpeechFailure.Client, SpeechFailure.Audio,
+                    SpeechFailure.Network, SpeechFailure.NetworkTimeout, SpeechFailure.Server,
+                    SpeechFailure.TooManyRequests,
+                )
+                if (retryTransient) transientSpeechRetries = (transientSpeechRetries + 1).coerceAtMost(8)
+                if (ordinarySilence || retryTransient) currentCoordinator.onSpeechStopped()
                 else currentCoordinator.onSpeechFailure()
-                if (speechSessionGeneration.compareAndSet(generation, generation + 1) && ordinarySilence) {
-                    restartAfterUtterance(generation + 1)
+                if (retryTransient) currentCoordinator.onSpeechPhase(VoicePhase.Retrying)
+                if (speechSessionGeneration.compareAndSet(generation, generation + 1) && (ordinarySilence || retryTransient)) {
+                    val retryDelay = when {
+                        failure == SpeechFailure.TooManyRequests -> 30_000L
+                        retryTransient -> 750L * transientSpeechRetries
+                        else -> 300L
+                    }
+                    restartAfterUtterance(generation + 1, retryDelay)
                 }
             }
         }
     }
 
-    private fun restartAfterUtterance(generation: Long) {
+    private fun restartAfterUtterance(generation: Long, delayMillis: Long = 300L) {
         speechRestartJob?.cancel()
         speechRestartJob = viewModelScope.launch {
-            delay(300L)
+            delay(delayMillis)
             val current = awaitCoordinator() ?: return@launch
             eventMutex.withLock {
                 if (generation == speechSessionGeneration.get()) startSpeechIfEligible(current)

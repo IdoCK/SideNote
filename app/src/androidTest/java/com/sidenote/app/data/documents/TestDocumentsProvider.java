@@ -169,6 +169,10 @@ public final class TestDocumentsProvider extends DocumentsProvider {
         if (!ROOT_ID.equals(parentDocumentId) || displayName.contains("/") || displayName.contains("\\")) {
             throw new FileNotFoundException("Invalid document name or parent");
         }
+        // ExternalStorageProvider appends the MIME extension on creation.
+        if ("text/plain".equals(mimeType) && !displayName.endsWith(".txt")) {
+            displayName += ".txt";
+        }
         File file = new File(fixtureDirectory(), displayName);
         try {
             if (!file.createNewFile()) {

@@ -32,6 +32,7 @@ class NotificationRefreshWorker(
                 is NotificationRefreshResult.Posted,
                 NotificationRefreshResult.Removed,
                 NotificationRefreshResult.PermissionDenied,
+                NotificationRefreshResult.Scheduled,
                 -> Result.success()
             }
         } catch (error: CancellationException) {

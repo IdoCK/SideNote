@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="shortcut_capture_short_label">Capture</string>
+    <string name="shortcut_capture_long_label">Capture a SideNote</string>
     <string name="shortcut_review_short_label">Review</string>
     <string name="shortcut_review_long_label">Review SideNote notes</string>
     <string name="shortcut_review_disabled_message">Review is unavailable</string>
@@ -14,7 +16,13 @@
     <string name="capture_save_and_recovery_failed">Could not save to your notes folder, and temporary recovery is unavailable. Keep this screen open while you restore folder access and retry.</string>
     <string name="capture_save_uncertain">Android could not confirm the folder update. Your draft and recovery copy are still here; check the Markdown file before trying again.</string>
     <string name="capture_save_uncertain_without_recovery">Android could not confirm the folder update, and temporary recovery is unavailable. Keep this screen open and inspect the Markdown file before retrying.</string>
-    <string name="capture_voice_unavailable">Voice is unavailable. You can keep typing.</string>
+    <string name="capture_voice_hint">Tap the blob to use speech.</string>
     <string name="capture_saved">Saved · %1$s</string>
     <string name="capture_discarded">Discarded</string>
+    <string name="voice_starting">Starting…</string>
+    <string name="voice_listening">Listening</string>
+    <string name="voice_processing">Processing…</string>
+    <string name="voice_retrying">Reconnecting…</string>
+    <string name="voice_off">Off</string>
+    <string name="capture_back_to_speech">Back to speech</string>
 </resources>

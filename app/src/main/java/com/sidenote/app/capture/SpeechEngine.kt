@@ -12,11 +12,17 @@ interface SpeechEngine : SpeechControl {
     fun destroy()
 
     interface Listener {
+        fun onReady() = Unit
+
+        fun onProcessing() = Unit
+
         fun onPartial(text: String)
 
         fun onFinal(text: String)
 
         fun onRms(normalizedRms: Float)
+
+        fun onAudioFeatures(features: SpeechAudioFeatures) { onRms(features.level) }
 
         fun onDetectedLanguage(languageTag: String)
 

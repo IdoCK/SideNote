@@ -10,6 +10,7 @@ import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.windowInsetsPadding
@@ -33,6 +34,7 @@ import com.sidenote.app.privacy.LockState
 import com.sidenote.app.privacy.UnlockGate
 import com.sidenote.app.review.ReviewViewModel
 import com.sidenote.app.ui.theme.SideNoteTheme
+import com.sidenote.app.ui.theme.SideNoteBackground
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
@@ -45,6 +47,7 @@ class MainActivity : ComponentActivity() {
     private val permissionState = mutableStateOf(PermissionState())
     private val protectedContentReady = mutableStateOf(false)
     private val setupUnavailable = mutableStateOf(false)
+    private val reviewLaunchGeneration = mutableStateOf(0)
     private var dismissRequested = false
     private var pendingMostRecentUnprocessed = false
     private var hasResumed = false
@@ -135,6 +138,7 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        reviewLaunchGeneration.value += 1
         consumeNotificationDestination(intent)
         if (::lockState.isInitialized) {
             lockState.refresh()
@@ -175,6 +179,7 @@ class MainActivity : ComponentActivity() {
             }
         }
         SideNoteNavHost(
+            reviewLaunchGeneration = reviewLaunchGeneration.value,
             mainState = mainState,
             reviewState = reviewState,
             permissions = permissionState.value,
@@ -195,7 +200,8 @@ class MainActivity : ComponentActivity() {
             onProcessedChange = reviewViewModel::setProcessed,
             onOpenProject = reviewViewModel::openProject,
             onOpenSourceDay = reviewViewModel::openSourceDay,
-            modifier = Modifier.windowInsetsPadding(WindowInsets.safeDrawing),
+            modifier = Modifier.background(SideNoteBackground)
+                .windowInsetsPadding(WindowInsets.safeDrawing),
         )
     }
 

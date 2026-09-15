@@ -87,7 +87,9 @@ class SafTextDocumentStore(
             val stageUri = DocumentsContract.createDocument(
                 contentResolver,
                 root.uri,
-                MIME_TYPE_TEXT,
+                // This is an internal stage, not the final Markdown document. A text/plain
+                // request makes ExternalStorageProvider append .txt to its exact name.
+                "application/octet-stream",
                 stageName,
             ) ?: return WriteOutcome.Failure(RepositoryError.WriteFailed)
             stage = when (val created = findExact(root, stageName)) {
@@ -503,7 +505,6 @@ class SafTextDocumentStore(
     }
 
     private companion object {
-        const val MIME_TYPE_TEXT = "text/plain"
         const val PREFERENCES_NAME = "saf_staged_replacement"
         const val PREFERENCE_OWNER_TOKEN = "owner_token"
         const val NO_EXPECTED_HASH = "none"

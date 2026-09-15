@@ -84,7 +84,13 @@ class AndroidSpeechEngine internal constructor(
                 currentCoroutineContext().ensureActive()
                 if (!isOwnedProbe(session)) return@forEach
                 val request = SpeechRequest(preferOffline = true, languageTag = languageTag)
-                val support = checkSupportOrNull(session, request) ?: return@forEach
+                val support = try {
+                    checkSupportOrNull(session, request)
+                } catch (_: RecognitionSupportException) {
+                    // The provider does not implement support queries. Let the download
+                    // API handle the explicit user request for this language.
+                    RecognitionSupportSnapshot(supportedOnDeviceLanguages = setOf(languageTag))
+                } ?: return@forEach
                 currentCoroutineContext().ensureActive()
                 if (!isOwnedProbe(session)) return@forEach
                 val downloadNeeded =
@@ -195,13 +201,22 @@ class AndroidSpeechEngine internal constructor(
             for (languageTag in SpeechSupport.requiredLanguages) {
                 currentCoroutineContext().ensureActive()
                 if (!isOwnedProbe(session)) break
-                val support = checkSupportOrNull(
-                    session,
-                    SpeechRequest(
-                        preferOffline = attempt == Attempt.Local,
-                        languageTag = languageTag,
-                    ),
-                ) ?: continue
+                val support = try {
+                    checkSupportOrNull(
+                        session,
+                        SpeechRequest(
+                            preferOffline = attempt == Attempt.Local,
+                            languageTag = languageTag,
+                        ),
+                    )
+                } catch (error: RecognitionSupportException) {
+                    // A service can recognize speech without implementing the optional
+                    // support query. Try it and let actual recognition report failure.
+                    if (error.errorCode == SpeechRecognizer.ERROR_CANNOT_CHECK_SUPPORT) {
+                        return SpeechSupport.requiredLanguages.toSet()
+                    }
+                    null
+                } ?: continue
                 if (!isOwnedProbe(session)) break
                 val pathLanguages = if (attempt == Attempt.Local) {
                     support.installedOnDeviceLanguages
@@ -266,11 +281,34 @@ class AndroidSpeechEngine internal constructor(
         currentGeneration: Long,
         activeSession: ActiveSession,
     ): RecognitionSessionListener = object : RecognitionSessionListener {
+        private val transcript = SpeechSegments()
+        override fun onReady() {
+            currentListener(currentGeneration, activeSession.session)?.onReady()
+        }
+
+        override fun onProcessing() {
+            currentListener(currentGeneration, activeSession.session)?.onProcessing()
+        }
+
         override fun onPartial(text: String) {
-            currentListener(currentGeneration, activeSession.session)?.onPartial(text)
+            val target = currentListener(currentGeneration, activeSession.session) ?: return
+            target.onPartial(transcript.update(text))
+        }
+
+        override fun onSegment(text: String) {
+            val target = currentListener(currentGeneration, activeSession.session) ?: return
+            if (text.isNotBlank()) target.onPartial(transcript.commit(text))
+        }
+
+        override fun onSegmentedSessionEnded() {
+            complete(transcript.text)
         }
 
         override fun onFinal(text: String) {
+            complete(transcript.finalText(text))
+        }
+
+        private fun complete(text: String) {
             if (text.isBlank()) {
                 finishUnavailableSession(
                     currentGeneration = currentGeneration,
@@ -296,6 +334,10 @@ class AndroidSpeechEngine internal constructor(
                 listener to rmsSmoother.update(rmsDb)
             }
             update.first?.onRms(update.second)
+        }
+
+        override fun onAudioFeatures(features: SpeechAudioFeatures) {
+            currentListener(currentGeneration, activeSession.session)?.onAudioFeatures(features)
         }
 
         override fun onDetectedLanguage(languageTag: String) {
@@ -402,6 +444,9 @@ class AndroidSpeechEngine internal constructor(
         }
     } catch (exception: CancellationException) {
         throw exception
+    } catch (exception: RecognitionSupportException) {
+        if (exception.errorCode == SpeechRecognizer.ERROR_CANNOT_CHECK_SUPPORT) throw exception
+        null
     } catch (_: Exception) {
         null
     }
@@ -520,6 +565,13 @@ internal interface RecognitionSession {
 }
 
 internal interface RecognitionSessionListener {
+    fun onSegment(text: String) = Unit
+    fun onSegmentedSessionEnded() = Unit
+    fun onAudioFeatures(features: SpeechAudioFeatures) = Unit
+    fun onReady() = Unit
+
+    fun onProcessing() = Unit
+
     fun onPartial(text: String)
 
     fun onFinal(text: String)
@@ -536,6 +588,7 @@ internal object SpeechIntentFactory {
         Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
+            putExtra(RecognizerIntent.EXTRA_ENABLE_FORMATTING, RecognizerIntent.FORMATTING_OPTIMIZE_QUALITY)
             putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, request.preferOffline)
             putExtra(RecognizerIntent.EXTRA_ENABLE_LANGUAGE_DETECTION, true)
             putExtra(
@@ -584,6 +637,7 @@ private class AndroidRecognitionSessionFactory(
     private val context: Context,
 ) : RecognitionSessionFactory {
     private val executor: Executor = context.mainExecutor
+    private val sharedAudioEnabled = java.util.concurrent.atomic.AtomicBoolean(true)
 
     override fun create(attempt: Attempt): RecognitionSession {
         val recognizer = when (attempt) {
@@ -597,37 +651,59 @@ private class AndroidRecognitionSessionFactory(
                 SpeechRecognizer.createSpeechRecognizer(context)
             }
         }
-        return AndroidRecognitionSession(recognizer, executor)
+        return AndroidRecognitionSession(recognizer, executor, sharedAudioEnabled)
     }
 }
 
 private class AndroidRecognitionSession(
     private val recognizer: SpeechRecognizer,
     private val executor: Executor,
+    private val sharedAudioEnabled: java.util.concurrent.atomic.AtomicBoolean,
 ) : RecognitionSession {
     private var listener: RecognitionSessionListener? = null
+    private var audio: SharedSpeechAudio? = null
+    private var speaking = false
 
     init {
         recognizer.setRecognitionListener(
             object : RecognitionListener {
-                override fun onReadyForSpeech(params: Bundle?) = Unit
+                override fun onReadyForSpeech(params: Bundle?) { listener?.onReady() }
 
-                override fun onBeginningOfSpeech() = Unit
+                override fun onBeginningOfSpeech() {
+                    speaking = true
+                    android.util.Log.i("SideNoteAudio", "Speech detected")
+                }
 
                 override fun onRmsChanged(rmsdB: Float) {
-                    listener?.onRmsChanged(rmsdB)
+                    if (audio == null && speaking) listener?.onRmsChanged(rmsdB)
                 }
 
                 override fun onBufferReceived(buffer: ByteArray?) = Unit
 
-                override fun onEndOfSpeech() = Unit
+                override fun onEndOfSpeech() {
+                    speaking = false
+                    listener?.onAudioFeatures(SpeechAudioFeatures())
+                    listener?.onProcessing()
+                }
 
                 override fun onError(error: Int) {
+                    if (audio != null && error in setOf(
+                            SpeechRecognizer.ERROR_AUDIO, SpeechRecognizer.ERROR_CLIENT,
+                        )) sharedAudioEnabled.set(false)
                     listener?.onError(error)
                 }
 
                 override fun onResults(results: Bundle?) {
                     listener?.onFinal(terminalRecognitionText(results))
+                }
+
+                override fun onSegmentResults(segmentResults: Bundle) {
+                    android.util.Log.i("SideNoteAudio", "Speech segment committed")
+                    listener?.onSegment(terminalRecognitionText(segmentResults))
+                }
+
+                override fun onEndOfSegmentedSession() {
+                    listener?.onSegmentedSessionEnded()
                 }
 
                 override fun onPartialResults(partialResults: Bundle?) {
@@ -648,20 +724,68 @@ private class AndroidRecognitionSession(
 
     override fun start(request: SpeechRequest, listener: RecognitionSessionListener) {
         this.listener = listener
-        recognizer.startListening(SpeechIntentFactory.create(request))
+        val intent = SpeechIntentFactory.create(request)
+        if (sharedAudioEnabled.get()) {
+            try {
+                val input = SharedSpeechAudio(
+                    onFeatures = { listener.onAudioFeatures(if (speaking) it else SpeechAudioFeatures()) },
+                    onFailure = {
+                        sharedAudioEnabled.set(false)
+                        this.listener?.onError(SpeechRecognizer.ERROR_AUDIO)
+                    },
+                )
+                audio = input
+                intent.putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE, input.source)
+                intent.putExtra(RecognizerIntent.EXTRA_SEGMENTED_SESSION, RecognizerIntent.EXTRA_AUDIO_SOURCE)
+                intent.putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_CHANNEL_COUNT, 1)
+                intent.putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_ENCODING, android.media.AudioFormat.ENCODING_PCM_16BIT)
+                intent.putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_SAMPLING_RATE, SharedSpeechAudio.SAMPLE_RATE)
+                recognizer.startListening(intent)
+                input.start()
+                android.util.Log.i("SideNoteAudio", "Shared microphone analysis started")
+                return
+            } catch (_: SecurityException) {
+                closeAudio()
+                listener.onError(SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS)
+                return
+            } catch (_: Exception) {
+                sharedAudioEnabled.set(false)
+                audio?.close()
+                audio = null
+                // Retry through the existing session lifecycle, without opening a second mic.
+                listener.onError(SpeechRecognizer.ERROR_AUDIO)
+                return
+            }
+        }
+        android.util.Log.i("SideNoteAudio", "Recognizer microphone fallback")
+        recognizer.startListening(intent)
     }
 
     override fun stop() {
-        recognizer.stopListening()
+        val input = audio
+        if (input != null) {
+            // EXTRA_AUDIO_SOURCE segmented sessions end when the audio stream closes.
+            // stopListening competes with EOF and can delay or suppress the terminal result.
+            input.finishInput()
+        } else {
+            recognizer.stopListening()
+        }
     }
 
     override fun cancel() {
-        recognizer.cancel()
+        try { recognizer.cancel() } finally { closeAudio() }
     }
 
     override fun destroy() {
         listener = null
-        recognizer.destroy()
+        try { recognizer.destroy() } finally { closeAudio() }
+    }
+
+    private fun closeAudio() {
+        speaking = false
+        val previous = audio
+        audio = null
+        previous?.close()
     }
 
     override suspend fun checkSupport(request: SpeechRequest): RecognitionSupportSnapshot =
@@ -699,5 +823,5 @@ private fun RecognitionSupport.toSnapshot(): RecognitionSupportSnapshot =
         onlineLanguages = onlineLanguages.toSet(),
     )
 
-private class RecognitionSupportException(errorCode: Int) :
+internal class RecognitionSupportException(val errorCode: Int) :
     IllegalStateException("Speech recognition support check failed: $errorCode")

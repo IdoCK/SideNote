@@ -1,6 +1,12 @@
 package com.sidenote.app.review.ui
 
 import android.net.Uri
+import android.graphics.Bitmap
+import androidx.compose.ui.graphics.asAndroidBitmap
+import androidx.compose.ui.test.captureToImage
+import androidx.compose.ui.test.onRoot
+import androidx.test.platform.app.InstrumentationRegistry
+import java.io.File
 import androidx.activity.compose.setContent
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
@@ -11,6 +17,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsOff
+import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.assertIsOn
 import androidx.compose.ui.test.getUnclippedBoundsInRoot
 import androidx.compose.ui.test.hasContentDescription
@@ -20,6 +27,7 @@ import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.swipeLeft
@@ -84,8 +92,7 @@ class ReviewScreenTest {
                 selectedDate = LocalDate.parse("2026-08-27"),
             ),
         )
-        var previousCalls = 0
-        var nextCalls = 0
+        val selectedDates = mutableListOf<LocalDate>()
         var settingsCalls = 0
 
         setContent {
@@ -93,8 +100,9 @@ class ReviewScreenTest {
                 state = state,
                 onShowDates = {},
                 onShowProjects = {},
-                onPreviousDay = { previousCalls += 1 },
-                onNextDay = { nextCalls += 1 },
+                onPreviousDay = {},
+                onNextDay = {},
+                onSelectDate = { selectedDates += it },
                 onOpenSettings = { settingsCalls += 1 },
                 onToggleExpanded = { target ->
                     val id = target.id
@@ -110,14 +118,13 @@ class ReviewScreenTest {
             )
         }
 
-        compose.onNodeWithText("Dates").assertIsDisplayed()
-        compose.onNodeWithText("Projects").assertIsDisplayed()
-        compose.onNodeWithContentDescription("Previous day").performClick()
-        compose.onNodeWithContentDescription("Next day").performClick()
+        compose.onNodeWithContentDescription("Dates").assertIsDisplayed()
+        compose.onNodeWithContentDescription("Projects").assertIsDisplayed()
+        compose.onNodeWithContentDescription("Open date 2026-08-26").performClick()
+        compose.onNodeWithContentDescription("Open date 2026-08-27").performClick()
         compose.onNodeWithContentDescription("Settings").performClick()
         compose.runOnIdle {
-            assertThat(previousCalls).isEqualTo(1)
-            assertThat(nextCalls).isEqualTo(1)
+            assertThat(selectedDates).containsExactly(LocalDate.parse("2026-08-26"), LocalDate.parse("2026-08-27")).inOrder()
             assertThat(settingsCalls).isEqualTo(1)
         }
 
@@ -150,16 +157,182 @@ class ReviewScreenTest {
             },
         ).isTrue()
 
-        compose.onNodeWithContentDescription("Expand note 1")
-            .assertStateDescription("Collapsed")
-            .performClick()
-        compose.onNodeWithContentDescription("Collapse note 1")
-            .assertStateDescription("Expanded")
-        compose.onNodeWithText("Plan שיפוץ @Home", useUnmergedTree = true).assertIsDisplayed()
+        compose.onNodeWithContentDescription("Expand note 1").assertDoesNotExist()
+        compose.onNodeWithContentDescription("Expand note 2").assertDoesNotExist()
+        compose.onNodeWithContentDescription("Dates").assertIsSelected()
+        compose.onNodeWithText("Browse dates").assertDoesNotExist()
+        compose.onNodeWithContentDescription("Previous day").assertDoesNotExist()
+        compose.onNodeWithContentDescription("Next day").assertDoesNotExist()
     }
 
     @Test
-    fun proseOnlyMarkdownIsVisibleAsReadOnlySourceContent() {
+    fun multilineNoteWithShortFirstLineStillExposesExpansion() {
+        val note = entry("2026-08-27", "08:15", "First line\nMore detail", false, 0)
+        var state by mutableStateOf(
+            ReviewState(days = listOf(ReviewDay(note.entry.date, listOf(note))), selectedDate = note.entry.date),
+        )
+        setContent {
+            motionReview(state, onToggleExpanded = {
+                state = state.copy(expanded = if (state.expanded.isEmpty()) setOf(note.id) else emptySet())
+            })
+        }
+        compose.onNodeWithContentDescription("Expand note 1").performClick()
+        compose.onNodeWithText("First line\nMore detail").assertIsDisplayed()
+        compose.onNodeWithContentDescription("Collapse note 1").performClick()
+        compose.onNodeWithContentDescription("Expand note 1").assertStateDescription("Collapsed")
+    }
+
+    @Test
+    fun expandingAndCollapsingNoteMovesItsBottomGraduallyAndKeepsItsTopAnchored() {
+        val note = entry("2026-08-27", "08:15", "A long note with enough detail to wrap onto several lines. ".repeat(8), false, 0)
+        var state by mutableStateOf(
+            ReviewState(days = listOf(ReviewDay(note.entry.date, listOf(note))), selectedDate = note.entry.date),
+        )
+        setContent {
+            motionReview(state, onToggleExpanded = {
+                state = state.copy(expanded = if (state.expanded.isEmpty()) setOf(note.id) else emptySet())
+            })
+        }
+        val row = compose.onNodeWithTag("$REVIEW_ENTRY_TAG.0")
+        val collapsed = row.getUnclippedBoundsInRoot()
+        saveScreenshot("review-note-collapsed.png")
+        compose.mainClock.autoAdvance = false
+        compose.onNodeWithContentDescription("Expand note 1").performClick()
+        compose.mainClock.advanceTimeBy(80)
+        val expanding = row.getUnclippedBoundsInRoot()
+        compose.mainClock.advanceTimeBy(300)
+        val expanded = row.getUnclippedBoundsInRoot()
+        saveScreenshot("review-note-expanded.png")
+        assertThat((expanding.bottom - expanding.top).value).isGreaterThan((collapsed.bottom - collapsed.top).value)
+        assertThat((expanding.bottom - expanding.top).value).isLessThan((expanded.bottom - expanded.top).value)
+        assertThat(expanding.top).isEqualTo(collapsed.top)
+        compose.onNodeWithContentDescription("Collapse note 1").performClick()
+        compose.mainClock.advanceTimeBy(80)
+        val collapsing = row.getUnclippedBoundsInRoot()
+        assertThat((collapsing.bottom - collapsing.top).value).isLessThan((expanded.bottom - expanded.top).value)
+        assertThat((collapsing.bottom - collapsing.top).value).isGreaterThan((collapsed.bottom - collapsed.top).value)
+        assertThat(collapsing.top).isEqualTo(collapsed.top)
+        compose.mainClock.advanceTimeBy(300)
+        val settled = row.getUnclippedBoundsInRoot()
+        assertThat(settled.bottom - settled.top).isEqualTo(collapsed.bottom - collapsed.top)
+        compose.mainClock.autoAdvance = true
+    }
+
+    @Test
+    fun daySlidesFollowNavigationDirectionAndOnlyIncomingNotesAreAccessible() {
+        val older = entry("2026-08-26", "08:15", "Older day note", false, 0)
+        val newer = entry("2026-08-27", "09:00", "Newer day note", false, 0)
+        var state by mutableStateOf(
+            ReviewState(
+                days = listOf(ReviewDay(older.entry.date, listOf(older)), ReviewDay(newer.entry.date, listOf(newer))),
+                selectedDate = older.entry.date,
+            ),
+        )
+        setContent {
+            motionReview(
+                state,
+                onPreviousDay = { state = state.copy(selectedDate = older.entry.date) },
+                onNextDay = { state = state.copy(selectedDate = newer.entry.date) },
+                onSelectDate = { state = state.copy(selectedDate = it) },
+            )
+        }
+        val restingLeft = compose.onNodeWithTag("$REVIEW_ENTRY_TAG.0").getUnclippedBoundsInRoot().left.value
+        compose.mainClock.autoAdvance = false
+        compose.onNodeWithContentDescription("Open date 2026-08-27").performClick()
+        compose.mainClock.advanceTimeBy(80)
+        val arrivingFromRight = compose.onNodeWithTag("$REVIEW_ENTRY_TAG.0").getUnclippedBoundsInRoot().left.value
+        assertThat(arrivingFromRight).isGreaterThan(restingLeft)
+        compose.onNodeWithText("Older day note").assertDoesNotExist()
+        // The outgoing page remains visually intact while hidden from the merged accessibility tree.
+        compose.onNodeWithText("Older day note", useUnmergedTree = true).assertExists()
+        assertThat(compose.onAllNodesWithTag(REVIEW_CHECKBOX_TAG).fetchSemanticsNodes()).hasSize(1)
+        compose.mainClock.advanceTimeBy(300)
+        compose.onNodeWithText("Older day note", useUnmergedTree = true).assertDoesNotExist()
+        compose.onNodeWithContentDescription("Open date 2026-08-26").performClick()
+        compose.mainClock.advanceTimeBy(80)
+        val arrivingFromLeft = compose.onNodeWithTag("$REVIEW_ENTRY_TAG.0").getUnclippedBoundsInRoot().left.value
+        assertThat(arrivingFromLeft).isLessThan(restingLeft)
+        compose.mainClock.advanceTimeBy(300)
+        compose.mainClock.autoAdvance = true
+    }
+
+    @Test
+    fun switchingTabsKeepsOutgoingSnapshotWhileHidingItsActions() {
+        val note = entry("2026-08-27", "08:15", "Date snapshot", false, 0)
+        var state by mutableStateOf(
+            ReviewState(days = listOf(ReviewDay(note.entry.date, listOf(note))), selectedDate = note.entry.date),
+        )
+        setContent {
+            motionReview(state, onShowProjects = { state = state.copy(tab = ReviewTab.Projects) })
+        }
+        compose.mainClock.autoAdvance = false
+        compose.onNodeWithContentDescription("Projects").performClick()
+        compose.mainClock.advanceTimeBy(80)
+        compose.onNodeWithText("Date snapshot").assertDoesNotExist()
+        compose.onNodeWithText("Date snapshot", useUnmergedTree = true).assertExists()
+        compose.onNodeWithContentDescription("Expand note 1").assertDoesNotExist()
+        compose.onNodeWithText("No project tags yet.").assertExists()
+        compose.onNodeWithContentDescription("Projects").assertIsSelected()
+        val movingLeft = compose.onNodeWithText("No project tags yet.").getUnclippedBoundsInRoot().left.value
+        compose.mainClock.advanceTimeBy(300)
+        val settledLeft = compose.onNodeWithText("No project tags yet.").getUnclippedBoundsInRoot().left.value
+        assertThat(movingLeft).isGreaterThan(settledLeft)
+        compose.onNodeWithText("Date snapshot", useUnmergedTree = true).assertDoesNotExist()
+        compose.mainClock.autoAdvance = true
+    }
+
+    @Test
+    fun openingProjectPreservesTheOutgoingListAndExposesOnlyTheDetail() {
+        val note = entry("2026-08-27", "08:15", "Project detail note", false, 0)
+        var state by mutableStateOf(
+            ReviewState(
+                tab = ReviewTab.Projects,
+                projects = listOf(ProjectGroup("sidenote", "SideNote", listOf(note))),
+            ),
+        )
+        setContent {
+            motionReview(state, onOpenProject = { state = state.copy(selectedProjectKey = it) })
+        }
+        compose.mainClock.autoAdvance = false
+        compose.onNodeWithText("SideNote").performClick()
+        compose.mainClock.advanceTimeBy(80)
+        compose.onNodeWithText("SideNote").assertExists()
+        assertThat(compose.onAllNodesWithTag(REVIEW_CHECKBOX_TAG).fetchSemanticsNodes()).hasSize(1)
+        compose.onNodeWithText("All projects").assertExists()
+        val movingLeft = compose.onNodeWithText("Project detail note").getUnclippedBoundsInRoot().left.value
+        compose.mainClock.advanceTimeBy(300)
+        val settledLeft = compose.onNodeWithText("Project detail note").getUnclippedBoundsInRoot().left.value
+        assertThat(movingLeft).isGreaterThan(settledLeft)
+        compose.mainClock.autoAdvance = true
+    }
+
+    @androidx.compose.runtime.Composable
+    private fun motionReview(
+        state: ReviewState,
+        onToggleExpanded: (ReviewEntry) -> Unit = {},
+        onPreviousDay: () -> Unit = {},
+        onNextDay: () -> Unit = {},
+        onShowProjects: () -> Unit = {},
+        onOpenProject: (String) -> Unit = {},
+        onSelectDate: (LocalDate) -> Unit = {},
+    ) {
+        ReviewScreen(
+            state = state,
+            onShowDates = {},
+            onShowProjects = onShowProjects,
+            onPreviousDay = onPreviousDay,
+            onNextDay = onNextDay,
+            onSelectDate = onSelectDate,
+            onOpenSettings = {},
+            onToggleExpanded = onToggleExpanded,
+            onProcessedChange = { _, _ -> },
+            onOpenProject = onOpenProject,
+            onOpenSourceDay = {},
+        )
+    }
+
+    @Test
+    fun originalMarkdownIsNotShownInReview() {
         val date = LocalDate.parse("2026-08-28")
         val raw = "# 2026-08-28\n\nOrdinary prose that SideNote does not edit.\n- [ ] malformed task\n"
 
@@ -181,10 +354,11 @@ class ReviewScreenTest {
             )
         }
 
-        compose.onNodeWithText("Original Markdown · read only").assertIsDisplayed()
+        compose.onNodeWithText("Original Markdown · read only").assertDoesNotExist()
         compose.onNodeWithText("Ordinary prose that SideNote does not edit.", substring = true)
-            .assertIsDisplayed()
-        compose.onNodeWithText("- [ ] malformed task", substring = true).assertIsDisplayed()
+            .assertDoesNotExist()
+        compose.onNodeWithText("- [ ] malformed task", substring = true).assertDoesNotExist()
+        compose.onNodeWithText("No SideNote entries for this day.").assertIsDisplayed()
     }
 
     @Test
@@ -237,7 +411,7 @@ class ReviewScreenTest {
     }
 
     @Test
-    fun longDateBrowserAndHorizontalSwipeWorkAlongsideExplicitDayButtons() {
+    fun longDateBrowserAndHorizontalSwipeNavigateWithoutExtraButtons() {
         val days = (0 until 120).map { offset ->
             ReviewDay(LocalDate.of(2026, 1, 1).plusDays(offset.toLong()), emptyList())
         }
@@ -266,8 +440,8 @@ class ReviewScreenTest {
             )
         }
 
-        compose.onNodeWithContentDescription("Previous day").assertIsDisplayed()
-        compose.onNodeWithContentDescription("Next day").assertIsDisplayed()
+        compose.onNodeWithContentDescription("Previous day").assertDoesNotExist()
+        compose.onNodeWithContentDescription("Next day").assertDoesNotExist()
         val beforeSwipe = state.selectedDate
         compose.onNodeWithTag(REVIEW_DATES_CONTENT_TAG).performTouchInput { swipeLeft() }
         compose.runOnIdle { assertThat(state.selectedDate).isEqualTo(beforeSwipe?.plusDays(1)) }
@@ -307,29 +481,29 @@ class ReviewScreenTest {
             )
         }
 
-        compose.onNodeWithText("Notes folder").assertIsDisplayed()
+        compose.onNodeWithText("Notes folder").performScrollTo().assertIsDisplayed()
         compose.onNodeWithText("That setting could not be saved. Please try again.")
-            .assertIsDisplayed()
-        compose.onNodeWithText("Change folder").performClick()
-        compose.onNodeWithText("Voice on at launch").assertIsDisplayed()
-        compose.onNodeWithText("Allow online voice recognition").performClick()
-        compose.onNodeWithText("Microphone: Not allowed").assertIsDisplayed()
-        compose.onNodeWithText("Notifications: Not allowed").assertIsDisplayed()
+            .performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("Change folder").performScrollTo().performClick()
+        compose.onNodeWithText("Voice on at launch").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("Microphone: Not allowed").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("Notifications: Not allowed").performScrollTo().assertIsDisplayed()
         compose.onNodeWithText(
             "The unprocessed-note reminder is unavailable. Capture and Review still work.",
-        ).assertIsDisplayed()
-        compose.onNodeWithText("Review permissions").performClick()
+        ).performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("Review permissions").performScrollTo().performClick()
         compose.onNodeWithText(
-            "Settings → System → Gestures → Quick Tap → Open app → SideNote",
-        ).assertIsDisplayed()
+            "Settings → System → Gestures → Quick Tap → Open app → SideNote → Capture",
+        ).performScrollTo().assertIsDisplayed()
         compose.onNodeWithText("Markdown files are the source of truth", substring = true)
-            .assertIsDisplayed()
+            .performScrollTo().assertIsDisplayed()
         compose.runOnIdle {
             assertThat(folderCalls).isEqualTo(1)
             assertThat(permissionCalls).isEqualTo(1)
             assertThat(fallback).isNull()
         }
 
+        compose.onNodeWithText("Allow online voice recognition").performScrollTo().performClick()
         compose.onNodeWithText(
             "Voice is processed on this phone when available. When necessary, Android's speech service may process it online.",
         ).assertIsDisplayed()
@@ -374,14 +548,22 @@ class ReviewScreenTest {
 
         val root = compose.onNodeWithTag(REVIEW_ROOT_TAG).bounds()
         listOf(
-            compose.onNodeWithText("Dates").bounds(),
-            compose.onNodeWithText("Projects").bounds(),
+            compose.onNodeWithContentDescription("Dates").bounds(),
+            compose.onNodeWithContentDescription("Projects").bounds(),
             compose.onNodeWithContentDescription("Settings").bounds(),
             compose.onNodeWithTag("$REVIEW_ENTRY_TAG.0").bounds(),
         ).forEach { child -> assertContained(child, root) }
         compose.onNodeWithText("Call דנה about @Home renovation", useUnmergedTree = true)
             .assertIsDisplayed()
         compose.runOnIdle { assertThat(effectiveFontScale).isEqualTo(2f) }
+    }
+
+    private fun saveScreenshot(name: String) {
+        val bitmap = compose.onRoot().captureToImage().asAndroidBitmap()
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        File(context.getExternalFilesDir(null), name).outputStream().use {
+            bitmap.compress(Bitmap.CompressFormat.PNG, 100, it)
+        }
     }
 
     private fun entry(

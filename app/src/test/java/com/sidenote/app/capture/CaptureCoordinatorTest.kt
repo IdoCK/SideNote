@@ -28,6 +28,19 @@ import org.junit.Before
 import org.junit.Test
 
 class CaptureCoordinatorTest {
+    @Test
+    fun continuousSegmentTranscriptAndPunctuationSurviveTheEndEvent() = runTest {
+        coordinator.start(true, null)
+        coordinator.onSpeechPartial("First thought.")
+        coordinator.onSpeechPartial("First thought. Second thought insert question")
+        coordinator.onSpeechPartial("First thought. Second thought insert question mark")
+        assertThat(coordinator.state.value.draft.text).isEqualTo("First thought. Second thought?")
+        speech.onStop = {
+            coordinator.onSpeechFinal("First thought. Second thought insert question mark", Locale.ENGLISH)
+        }
+        coordinator.complete(CompletionSignal.ScreenOff)
+        assertThat(repository.appends).containsExactly(AppendCall("First thought. Second thought?", instant, zone))
+    }
     private val instant = Instant.parse("2026-08-29T14:26:00Z")
     private val zone = ZoneId.of("America/New_York")
     private lateinit var repository: RecordingDocumentRepository
@@ -82,6 +95,18 @@ class CaptureCoordinatorTest {
 
         assertThat(coordinator.state.value.voiceEnabled).isFalse()
         assertThat(coordinator.state.value.draft.text).isEmpty()
+    }
+
+    @Test
+    fun selectionOnlyCallbackAfterStartingVoiceDoesNotStopRecognition() {
+        coordinator.start(false, null)
+        coordinator.onUserEdit(TextFieldValue("existing note", TextRange(13)))
+        coordinator.onVoiceToggle()
+        coordinator.onUserEdit(TextFieldValue("existing note", TextRange(0)))
+        assertThat(coordinator.state.value.voiceEnabled).isTrue()
+        assertThat(speech.stopCalls).isEqualTo(0)
+        coordinator.onSpeechFinal("another thought", Locale.ENGLISH)
+        assertThat(coordinator.state.value.draft.text).contains("another thought")
     }
 
     @Test
@@ -277,6 +302,25 @@ class CaptureCoordinatorTest {
         completion.join()
         assertThat(repository.appends).containsExactly(AppendCall("stable draft", instant, zone))
         assertThat(recovery.clearCalls).isEqualTo(1)
+        assertThat(closer.closeCalls).isEqualTo(1)
+    }
+
+    @Test
+    fun lockStateSuggestionClearDuringSaveStillClosesAndNeverAppendsAgain() = runTest {
+        val suspended = repository.suspendNextAppend()
+        coordinator.start(false, RecoveryDraft("save once", TextRange(9), false))
+        val completion = launch { coordinator.complete(CompletionSignal.ScreenOff) }
+        suspended.started.await()
+
+        // Capture refreshes privacy-sensitive suggestions when resuming under keyguard.
+        coordinator.onProjectSuggestions(emptyList())
+        suspended.release.complete(Unit)
+        completion.join()
+
+        assertThat(coordinator.state.value.status).isEqualTo(CaptureStatus.Saved)
+        assertThat(closer.closeCalls).isEqualTo(1)
+        coordinator.complete(CompletionSignal.Backgrounded)
+        assertThat(repository.appends).containsExactly(AppendCall("save once", instant, zone))
         assertThat(closer.closeCalls).isEqualTo(1)
     }
 

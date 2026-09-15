@@ -30,7 +30,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.LiveRegionMode
-import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -53,6 +52,8 @@ fun SettingsScreen(
     onRequestPermissions: () -> Unit,
     modifier: Modifier = Modifier,
     message: String? = null,
+    onShowDates: () -> Unit = onBack,
+    onShowProjects: () -> Unit = onBack,
 ) {
     var showDisclosure by remember { mutableStateOf(false) }
     Surface(
@@ -60,87 +61,95 @@ fun SettingsScreen(
         contentColor = ReviewText,
         modifier = modifier.fillMaxSize(),
     ) {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 20.dp, vertical = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
+        Column(modifier = Modifier.fillMaxSize()) {
+            ReviewNavigation(
+                selected = null,
+                onShowDates = onShowDates,
+                onShowProjects = onShowProjects,
+                onOpenSettings = {},
+            )
+            HorizontalDivider(color = Color(0xFF3A3A3A))
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 20.dp, vertical = 16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                TextButton(onClick = onBack, modifier = Modifier.sizeIn(minHeight = 48.dp)) {
-                    Text("Back")
-                }
-                Text(
-                    text = "Settings",
-                    style = MaterialTheme.typography.headlineMedium,
-                    fontWeight = FontWeight.Bold,
-                    modifier = Modifier.padding(start = 8.dp).semantics { heading() },
-                )
-            }
-            message?.let { feedback ->
-                Text(
-                    text = feedback,
-                    color = ReviewText,
-                    modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
-                )
-            }
-            SettingSection("Notes folder") {
-                Text(folderLabel.ifBlank { "Not selected" }, color = ReviewSubdued)
-                Button(onClick = onChooseFolder, modifier = Modifier.sizeIn(minHeight = 48.dp)) {
-                    Text("Change folder")
-                }
-                Text(
-                    "Changing folders does not move files from the old folder.",
-                    color = ReviewSubdued,
-                )
-            }
-            SettingSection("Capture") {
-                SettingsToggle(
-                    label = "Voice on at launch",
-                    checked = settings.voiceOnAtLaunch,
-                    onCheckedChange = onVoiceOnAtLaunchChange,
-                )
-                SettingsToggle(
-                    label = "Allow online voice recognition",
-                    checked = settings.onlineFallbackAllowed,
-                    onCheckedChange = { checked ->
-                        if (checked && !settings.voiceDisclosureAccepted) {
-                            showDisclosure = true
-                        } else {
-                            onOnlineFallbackChange(checked)
-                        }
-                    },
-                )
-            }
-            SettingSection("Permissions") {
-                Text("Microphone: ${permissionLabel(microphoneGranted)}")
-                Text("Notifications: ${permissionLabel(notificationsGranted)}")
-                if (!notificationsGranted) {
+                message?.let { feedback ->
                     Text(
-                        "The unprocessed-note reminder is unavailable. Capture and Review still work.",
+                        text = feedback,
+                        color = ReviewText,
+                        modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                    )
+                }
+                SettingSection("Notes folder") {
+                    Text(folderLabel.ifBlank { "Not selected" }, color = ReviewSubdued)
+                    Text(
+                        "Folder access is granted through Android's folder picker. Choose a folder and tap Use this folder to allow saving.",
+                        color = ReviewSubdued,
+                    )
+                    Button(onClick = onChooseFolder, modifier = Modifier.sizeIn(minHeight = 48.dp)) {
+                        Text("Change folder")
+                    }
+                    Text(
+                        "Changing folders does not move files from the old folder.",
                         color = ReviewSubdued,
                     )
                 }
-                Button(
-                    onClick = onRequestPermissions,
-                    modifier = Modifier.sizeIn(minHeight = 48.dp),
-                ) {
-                    Text("Review permissions")
+                SettingSection("Capture") {
+                    Text(
+                        "Punctuation is added automatically when supported. You can also say “insert period”, “insert question mark”, “insert comma”, “new line”, or “new paragraph”.",
+                        color = ReviewSubdued,
+                    )
+                    SettingsToggle(
+                        label = "Voice on at launch",
+                        checked = settings.voiceOnAtLaunch,
+                        onCheckedChange = onVoiceOnAtLaunchChange,
+                    )
+                    SettingsToggle(
+                        label = "Allow online voice recognition",
+                        checked = settings.onlineFallbackAllowed,
+                        onCheckedChange = { checked ->
+                            if (checked && !settings.voiceDisclosureAccepted) {
+                                showDisclosure = true
+                            } else {
+                                onOnlineFallbackChange(checked)
+                            }
+                        },
+                    )
                 }
+                SettingSection("Permissions") {
+                    Text("Microphone: ${permissionLabel(microphoneGranted)}")
+                    Text("Notifications: ${permissionLabel(notificationsGranted)}")
+                    if (!notificationsGranted) {
+                        Text(
+                            "The unprocessed-note reminder is unavailable. Capture and Review still work.",
+                            color = ReviewSubdued,
+                        )
+                    }
+                    Button(
+                        onClick = onRequestPermissions,
+                        modifier = Modifier.sizeIn(minHeight = 48.dp),
+                    ) {
+                        Text("Review permissions")
+                    }
+                }
+                SettingSection("Power button capture") {
+                    Text("Choose SideNote in Android Settings → Apps → Default apps → Digital assistant app. This replaces Gemini as your default assistant.")
+                    Text("Then choose Digital assistant under Settings → System → Gestures → Press and hold power button. Hold Power to open Capture, including from the lock screen.")
+                    Text("SideNote does not listen for a wake word or monitor motion in the background.", color = ReviewSubdued)
+                }
+                SettingSection("Pixel Quick Tap") {
+                    Text("Settings → System → Gestures → Quick Tap → Open app → SideNote → Capture")
+                }
+                SettingSection("Your notes stay yours") {
+                    Text(
+                        "Markdown files are the source of truth. SideNote reads and updates those files directly; it does not keep a separate note or project database.",
+                    )
+                }
+                Spacer(Modifier.height(16.dp))
             }
-            SettingSection("Pixel Quick Tap") {
-                Text("Settings → System → Gestures → Quick Tap → Open app → SideNote")
-            }
-            SettingSection("Your notes stay yours") {
-                Text(
-                    "Markdown files are the source of truth. SideNote reads and updates those files directly; it does not keep a separate note or project database.",
-                )
-            }
-            Spacer(Modifier.height(16.dp))
         }
     }
 

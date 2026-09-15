@@ -9,6 +9,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.toPixelMap
+import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.SemanticsActions
@@ -128,6 +129,7 @@ class CaptureScreenTest {
             CaptureScreen(
                 state = CaptureState(
                     draft = TextFieldValue(text, TextRange(0, text.length)),
+                    voiceEnabled = false,
                 ),
                 onTextChanged = {},
                 onVoiceToggle = {},
@@ -143,9 +145,9 @@ class CaptureScreenTest {
             for (x in 0 until pixels.width) {
                 val color = pixels[x, y]
                 if (
-                    color.red in 0.69f..0.75f &&
-                    color.green in 0.68f..0.74f &&
-                    color.blue in 0.66f..0.72f
+                    color.red in 0.13f..0.19f &&
+                    color.green in 0.13f..0.19f &&
+                    color.blue in 0.13f..0.19f
                 ) {
                     neutralSelectionPixels += 1
                 }
@@ -158,11 +160,12 @@ class CaptureScreenTest {
     fun typingDispatchesTextAndBlobToggleIsAccessible() {
         val edits = mutableListOf<TextFieldValue>()
         var toggles = 0
+        var state by mutableStateOf(CaptureState(voiceEnabled = false))
         setContent {
             CaptureScreen(
-                state = CaptureState(voiceEnabled = false),
-                onTextChanged = { edits += it },
-                onVoiceToggle = { toggles += 1 },
+                state = state,
+                onTextChanged = { edits += it; state = state.copy(draft = it) },
+                onVoiceToggle = { toggles += 1; state = state.copy(voiceEnabled = !state.voiceEnabled) },
                 onDiscard = {},
             )
         }
@@ -172,9 +175,8 @@ class CaptureScreenTest {
             assertThat(edits.last().text).isEqualTo("שלום")
         }
 
-        compose.onNodeWithContentDescription("Voice input off")
-            .assertIsOff()
-            .performClick()
+        compose.onNodeWithText("Back to speech").performClick()
+        compose.onNodeWithContentDescription("Voice input on").assertIsOn()
         compose.runOnIdle {
             assertThat(toggles).isEqualTo(1)
         }
@@ -197,7 +199,7 @@ class CaptureScreenTest {
     }
 
     @Test
-    fun renderedLayoutUsesApprovedBlobSizeCardWidthAndUpperHalfCentering() {
+    fun speechIsProminentAndEditorIsAnchoredAtBottom() {
         setContent {
             CaptureScreen(CaptureState(), {}, {}, {})
         }
@@ -210,19 +212,15 @@ class CaptureScreenTest {
             .getUnclippedBoundsInRoot()
         val card = compose.onNodeWithTag(CAPTURE_CARD_TAG).getUnclippedBoundsInRoot()
         val rootWidth = root.right.value - root.left.value
-        val upperHeight = upper.bottom.value - upper.top.value
-        val lowerHeight = lower.bottom.value - lower.top.value
         val blobWidth = blob.right.value - blob.left.value
         val blobHeight = blob.bottom.value - blob.top.value
         val cardWidth = card.right.value - card.left.value
 
-        assertThat(blobWidth).isWithin(0.5f).of(132f)
-        assertThat(blobWidth).isAtLeast(112f)
-        assertThat(blobWidth).isAtMost(144f)
+        assertThat(blobWidth).isAtLeast(200f)
         assertThat(blobHeight).isWithin(0.5f).of(blobWidth)
-        assertThat(cardWidth / rootWidth).isWithin(0.01f).of(0.84f)
-        assertThat(upperHeight).isWithin(0.5f).of(lowerHeight)
-        assertThat(upper.bottom.value).isWithin(0.5f).of(lower.top.value)
+        assertThat(cardWidth / rootWidth).isWithin(0.01f).of(0.90f)
+        assertThat(root.bottom.value - card.bottom.value).isAtMost(100f)
+        assertThat(card.top.value).isGreaterThan(blob.bottom.value)
         assertThat((blob.left.value + blob.right.value) / 2f)
             .isWithin(0.5f)
             .of((upper.left.value + upper.right.value) / 2f)
@@ -232,6 +230,122 @@ class CaptureScreenTest {
         assertThat(blob.bottom.value).isAtMost(upper.bottom.value)
         assertThat(blobWidth).isAtLeast(48f)
         assertThat(blobHeight).isAtLeast(48f)
+    }
+
+    @Test
+    fun liquidBlobChangesShapeWithoutMovingItsTapTarget() {
+        compose.mainClock.autoAdvance = false
+        setContent {
+            CaptureScreen(CaptureState(rms = 0.85f, voicePhase = com.sidenote.app.capture.VoicePhase.Listening), {}, {}, {})
+        }
+        compose.mainClock.advanceTimeBy(250)
+        val blob = compose.onNodeWithContentDescription("Voice input on")
+        val before = blob.getUnclippedBoundsInRoot()
+        compose.mainClock.advanceTimeBy(250)
+        val first = blob.captureToImage().toPixelMap()
+        savePreview("capture-liquid-1.png")
+        compose.mainClock.advanceTimeBy(2200)
+        val second = blob.captureToImage().toPixelMap()
+        savePreview("capture-liquid-2.png")
+        assertThat(blob.getUnclippedBoundsInRoot()).isEqualTo(before)
+        var changed = 0
+        for (y in 0 until first.height) for (x in 0 until first.width) {
+            if (kotlin.math.abs(first[x, y].red - second[x, y].red) > 0.15f) changed++
+        }
+        assertThat(changed).isGreaterThan(100)
+        compose.mainClock.autoAdvance = true
+    }
+
+    @Test
+    fun firstTranscriptDoesNotMoveOrResizeTheEditor() {
+        var state by mutableStateOf(CaptureState())
+        setContent { CaptureScreen(state, {}, {}, {}) }
+        val before = compose.onNodeWithTag(CAPTURE_CARD_TAG).getUnclippedBoundsInRoot()
+        compose.runOnIdle { state = state.copy(draft = TextFieldValue("first words")) }
+        val after = compose.onNodeWithTag(CAPTURE_CARD_TAG).getUnclippedBoundsInRoot()
+        assertThat(after.top.value).isWithin(1f).of(before.top.value)
+        assertThat(after.bottom.value).isWithin(1f).of(before.bottom.value)
+    }
+
+    @Test
+    fun focusingEditorRaisesItAndPausesSpeech() {
+        var state by mutableStateOf(CaptureState())
+        setContent {
+            CaptureScreen(state, {}, { state = state.copy(voiceEnabled = !state.voiceEnabled) }, {})
+        }
+        val originalTop = compose.onNodeWithTag(CAPTURE_CARD_TAG).getUnclippedBoundsInRoot().top
+        val originalHeight = compose.onNodeWithTag(CAPTURE_CARD_TAG).getUnclippedBoundsInRoot().let { it.bottom - it.top }
+        compose.waitUntil(timeoutMillis = 5_000) {
+            var focused = false
+            scenario?.onActivity { focused = it.hasWindowFocus() }
+            focused
+        }
+        compose.onNodeWithTag(CAPTURE_INPUT_TAG).performClick()
+        compose.waitForIdle()
+        compose.waitUntil(timeoutMillis = 5_000) {
+            var visible = false
+            scenario?.onActivity {
+                visible = it.window.decorView.rootWindowInsets.isVisible(android.view.WindowInsets.Type.ime())
+            }
+            visible
+        }
+        assertThat(state.voiceEnabled).isFalse()
+        compose.onNodeWithText("Back to speech").assertIsDisplayed()
+        val raisedTop = compose.onNodeWithTag(CAPTURE_CARD_TAG).getUnclippedBoundsInRoot().top
+        val raisedHeight = compose.onNodeWithTag(CAPTURE_CARD_TAG).getUnclippedBoundsInRoot().let { it.bottom - it.top }
+        assertThat(raisedHeight.value).isWithin(1f).of(originalHeight.value)
+        assertThat(raisedTop.value).isLessThan(originalTop.value - 100f)
+        savePreview("capture-typing.png")
+        val instrumentation = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation()
+        instrumentation.uiAutomation.waitForIdle(300, 3_000)
+        instrumentation.uiAutomation.takeScreenshot()?.let { bitmap ->
+            java.io.File(application.getExternalFilesDir(null), "capture-keyboard.png").outputStream().use {
+                bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it)
+            }
+            bitmap.recycle()
+        }
+        var keyboardTop = 0
+        var pixelDensity = 1f
+        val contentLocation = IntArray(2)
+        scenario?.onActivity {
+            keyboardTop = it.windowManager.currentWindowMetrics.bounds.bottom -
+                it.window.decorView.rootWindowInsets.getInsets(android.view.WindowInsets.Type.ime()).bottom
+            pixelDensity = it.resources.displayMetrics.density
+            it.findViewById<android.view.ViewGroup>(android.R.id.content).getChildAt(0)
+                .getLocationOnScreen(contentLocation)
+        }
+        val cardBounds = compose.onNodeWithTag(CAPTURE_CARD_TAG).bounds()
+        val writingBounds = compose.onNodeWithTag(CAPTURE_WRITING_REGION_TAG).bounds()
+        val rootBounds = compose.onNodeWithTag(CAPTURE_ROOT_TAG).bounds()
+        android.util.Log.i("SideNoteLayout", "keyboardTop=$keyboardTop card=$cardBounds writing=$writingBounds root=$rootBounds contentY=${contentLocation[1]} density=$pixelDensity")
+        val cardScreenBottom = cardBounds.bottom + contentLocation[1]
+        assertThat((keyboardTop - cardScreenBottom) / pixelDensity).isAtMost(100f)
+        assertThat(cardScreenBottom).isAtMost(keyboardTop.toFloat())
+        compose.onNodeWithText("Back to speech").performClick()
+        compose.waitForIdle()
+        assertThat(state.voiceEnabled).isTrue()
+        compose.onNodeWithContentDescription("Voice input on").assertIsDisplayed()
+    }
+
+    @Test
+    fun speechRetryOffersGuidanceInsteadOfClaimingVoiceIsUnavailable() {
+        var state by mutableStateOf(CaptureState(
+            voiceEnabled = false,
+            status = com.sidenote.app.capture.CaptureStatus.SpeechUnavailable,
+        ))
+        setContent { CaptureScreen(state, {}, {}, {}) }
+        compose.onNodeWithText("Tap the blob to use speech.").assertIsDisplayed()
+        compose.onNodeWithText("Voice is unavailable", substring = true).assertDoesNotExist()
+        savePreview("capture-speech-guidance.png")
+        compose.runOnIdle { state = state.copy(voiceEnabled = true, status = com.sidenote.app.capture.CaptureStatus.Ready) }
+        compose.onNodeWithText("Tap the blob to use speech.").assertDoesNotExist()
+    }
+
+    private fun savePreview(name: String) {
+        val bitmap = compose.onNodeWithTag(CAPTURE_ROOT_TAG).captureToImage()
+        java.io.File(application.getExternalFilesDir(null), name).outputStream().use {
+            bitmap.asAndroidBitmap().compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it)
+        }
     }
 
     @Test

@@ -51,6 +51,8 @@ class CaptureActivity : ComponentActivity() {
     private var pendingCompletionSignal: CompletionSignal? = null
     private var initialSettings: AppSettings? = null
     private var reviewLaunch = false
+    private var reopenAfterSave = false
+    private var completionStartedAt: Long? = null
 
     private val externalSetupLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult(),
@@ -63,6 +65,7 @@ class CaptureActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        reopenAfterSave = savedInstanceState?.getBoolean(STATE_REOPEN_AFTER_SAVE, false) == true
         reviewLaunch = savedInstanceState?.getBoolean(STATE_REVIEW_LAUNCH, false) == true ||
             intent?.action == ACTION_REVIEW
         pendingCompletionSignal = savedInstanceState?.getString(STATE_PENDING_COMPLETION)?.let {
@@ -113,6 +116,7 @@ class CaptureActivity : ComponentActivity() {
                             state = state,
                             onTextChanged = current::onUserEdit,
                             onVoiceToggle = current::onVoiceToggle,
+                            onVoicePause = current::onVoicePause,
                             onDiscard = current::discard,
                             onRetryRecovery = current::retryRecovery,
                         )
@@ -155,12 +159,17 @@ class CaptureActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         if (intent.action == ACTION_REVIEW) {
+            reopenAfterSave = false
             reviewLaunch = true
             pendingCompletionSignal = null
             lockState.refresh()
             if (lockState.locked.value) requestDismissalOnce() else routeToReview()
-        } else if (!reviewLaunch) {
-            onCompletionSignal(CompletionSignal.RepeatedLaunch)
+        } else if (viewModel?.closingState()?.status in setOf(
+                CaptureStatus.Finalizing, CaptureStatus.Saving, CaptureStatus.Saved,
+            )) {
+            // singleTask delivers rapid assistant invocations to the saving activity.
+            // Preserve the request until its durable transaction finishes.
+            reopenAfterSave = true
         }
     }
 
@@ -168,6 +177,7 @@ class CaptureActivity : ComponentActivity() {
         initialSettings?.let { settings -> outState.putSettings(settings) }
         outState.putString(STATE_PENDING_COMPLETION, pendingCompletionSignal?.name)
         outState.putBoolean(STATE_REVIEW_LAUNCH, reviewLaunch)
+        outState.putBoolean(STATE_REOPEN_AFTER_SAVE, reopenAfterSave)
         super.onSaveInstanceState(outState)
     }
 
@@ -227,14 +237,21 @@ class CaptureActivity : ComponentActivity() {
                 window.decorView.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
             },
             closer = CaptureCloser {
+                completionStartedAt?.let { started ->
+                    android.util.Log.i("SideNoteTiming", "Capture completion: ${android.os.SystemClock.elapsedRealtime() - started} ms")
+                }
                 val closing = current.closingState()
                 val confirmation = when (closing.status) {
                     CaptureStatus.Saved -> closing.savedTime?.let { getString(R.string.capture_saved, it) }
                     CaptureStatus.Discarded -> getString(R.string.capture_discarded)
                     else -> null
                 }
-                confirmation?.let { Toast.makeText(this, it, Toast.LENGTH_SHORT).show() }
+                val reopen = reopenAfterSave && !reviewLaunch
+                reopenAfterSave = false
+                if (!reopen) confirmation?.let { Toast.makeText(this, it, Toast.LENGTH_SHORT).show() }
                 finish()
+                if (reopen) startActivity(Intent(this, CaptureActivity::class.java)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
             },
         )
         viewModel = current
@@ -257,6 +274,10 @@ class CaptureActivity : ComponentActivity() {
     }
 
     private fun onCompletionSignal(signal: CompletionSignal) {
+        if (completionStartedAt == null) completionStartedAt = android.os.SystemClock.elapsedRealtime()
+        if (signal == CompletionSignal.ScreenOff || signal == CompletionSignal.FaceDown) {
+            reopenAfterSave = false
+        }
         val current = viewModel
         if (current != null) {
             current.complete(signal)
@@ -283,7 +304,7 @@ class CaptureActivity : ComponentActivity() {
         setShowWhenLocked(false)
         startActivity(
             Intent(this, MainActivity::class.java).addFlags(
-                Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP,
+                Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP,
             ),
         )
         finish()
@@ -295,7 +316,7 @@ class CaptureActivity : ComponentActivity() {
         setShowWhenLocked(false)
         startActivity(
             Intent(this, MainActivity::class.java).addFlags(
-                Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP,
+                Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP,
             ),
         )
         finish()
@@ -322,6 +343,7 @@ class CaptureActivity : ComponentActivity() {
     }
 
     companion object {
+        private const val STATE_REOPEN_AFTER_SAVE = "capture_reopen_after_save"
         const val ACTION_REVIEW = "com.sidenote.app.REVIEW"
         private const val STATE_PENDING_COMPLETION = "capture_pending_completion"
         private const val STATE_REVIEW_LAUNCH = "capture_review_launch"

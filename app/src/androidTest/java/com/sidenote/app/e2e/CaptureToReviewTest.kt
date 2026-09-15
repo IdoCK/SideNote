@@ -11,6 +11,7 @@ import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
 import androidx.documentfile.provider.DocumentFile
@@ -109,7 +110,7 @@ class CaptureToReviewTest {
     @Test fun voicePartialFinalAndTypedEditsProduceOneLiteralMergedDocument() {
         launchCapture()
         compose.onNodeWithTag(CAPTURE_INPUT_TAG).performTextInput("Plan ")
-        compose.onNodeWithContentDescription("Voice input off").performClick()
+        compose.onNodeWithText("Back to speech").performClick()
         compose.waitUntil(5_000) { fixture.speech.listener != null }
         compose.runOnIdle { fixture.speech.listener!!.onPartial("רעיון") }
         compose.onNodeWithText("Plan רעיון").assertIsDisplayed()
@@ -165,6 +166,9 @@ class CaptureToReviewTest {
         fixture.seed("2026-08-27.md", "# 2026-08-27\n\n- [ ] **18:26** חדש @sidenote @בית\n")
         openReview()
         compose.onNodeWithText("Projects").performClick()
+        compose.waitUntil(5_000) {
+            compose.onAllNodesWithText("SideNote").fetchSemanticsNodes().size == 1
+        }
         compose.onNodeWithText("SideNote").performClick()
         compose.onNodeWithText("2 entries").assertIsDisplayed()
         compose.onNodeWithText("חדש @sidenote @בית").assertIsDisplayed()
@@ -230,7 +234,7 @@ internal class DocumentAcceptanceFixture : AutoCloseable, AppContainer {
     // Deliberately bypass SafTextDocumentStore/MarkdownCodec for fixture setup and assertions.
     fun seed(name: String, text: String) {
         val root = DocumentFile.fromTreeUri(context, TestDocumentsProvider.treeUri())!!
-        val file = root.findFile(name) ?: root.createFile("text/plain", name)!!
+        val file = root.findFile(name) ?: root.createFile("application/octet-stream", name)!!
         context.contentResolver.openOutputStream(file.uri, "wt")!!.bufferedWriter(Charsets.UTF_8).use { it.write(text) }
     }
 

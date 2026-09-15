@@ -26,6 +26,7 @@ import com.sidenote.app.notification.AndroidUnprocessedNotificationPublisher
 import com.sidenote.app.notification.NoOpNotificationRefreshScheduler
 import com.sidenote.app.notification.NotificationRefreshScheduler
 import com.sidenote.app.notification.NotificationRefresher
+import com.sidenote.app.notification.BackgroundNotificationRefresher
 import com.sidenote.app.notification.UnavailableNotificationRefresher
 import com.sidenote.app.notification.UnprocessedNotificationCoordinator
 import com.sidenote.app.notification.WorkManagerNotificationRefreshScheduler
@@ -105,7 +106,7 @@ class ProductionAppContainer(
         zone = ZoneId.systemDefault(),
         ioDispatcher = Dispatchers.IO,
         recoveryHandoff = captureRecoveryHandoff,
-        notificationRefresher = notificationRefresher,
+        notificationRefresher = BackgroundNotificationRefresher(notificationRefresher, captureProcessScope),
     )
 
     override fun mainDependencies(): MainDependencies = MainDependencies(

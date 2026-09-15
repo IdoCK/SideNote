@@ -10,6 +10,9 @@ import android.os.SystemClock
 import androidx.compose.ui.test.junit4.v2.createEmptyComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.assertTextEquals
+import com.sidenote.app.capture.ui.CAPTURE_INPUT_TAG
 import androidx.compose.ui.text.TextRange
 import androidx.lifecycle.Lifecycle
 import androidx.test.core.app.ActivityScenario
@@ -33,6 +36,7 @@ import com.sidenote.app.data.recovery.RecoveryLoadResult
 import com.sidenote.app.data.settings.AppSettings
 import com.sidenote.app.data.settings.SettingsRepository
 import com.sidenote.app.notification.NotificationRefresher
+import com.sidenote.app.notification.BackgroundNotificationRefresher
 import com.sidenote.app.notification.NotificationRefreshResult
 import com.sidenote.app.notification.UnavailableNotificationRefresher
 import java.time.Clock
@@ -96,23 +100,51 @@ class CaptureActivityTest {
     }
 
     @Test
-    fun secondSingleTopLaunchCompletesExactlyOnce() {
+    fun secondSingleTopLaunchKeepsCaptureOpenWithoutSaving() {
         launchCapture()
 
         targetContext.startActivity(
             Intent(targetContext, CaptureActivity::class.java)
+                .putExtra("repeat_delivered", true)
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
         )
 
-        compose.waitUntil(timeoutMillis = 5_000) {
-            container.repository.appends.size == 1
+        waitUntil(timeoutMillis = 5_000) {
+            var delivered = false
+            scenario?.onActivity { delivered = it.intent.getBooleanExtra("repeat_delivered", false) }
+            delivered
         }
-        assertThat(container.repository.appends).containsExactly("captured thought")
-        assertRecoveryFlushAppendAndClearOrder()
+        compose.waitForIdle()
+        assertThat(container.repository.appends).isEmpty()
+        scenario?.onActivity { assertThat(it.isFinishing).isFalse() }
+        compose.onNodeWithText("captured thought").fetchSemanticsNode()
     }
 
     @Test
-    fun committedCaptureWaitsForNotificationRefreshBeforeFinishingItsRealHost() {
+    fun launchWhileSavingOpensFreshCaptureAfterCommitInsteadOfClosingTheNewRequest() {
+        val pending = container.repository.suspendNextAppend()
+        launchCapture()
+        lateinit var original: CaptureActivity
+        scenario?.onActivity { original = it }
+        assertThat(container.completionSignals.simulate(Intent.ACTION_SCREEN_OFF)).isTrue()
+        compose.waitUntil(timeoutMillis = 5_000) { pending.started.isCompleted }
+        targetContext.startActivity(Intent(targetContext, CaptureActivity::class.java)
+            .putExtra("rapid_launch", true).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        waitUntil(timeoutMillis = 5_000) {
+            original.intent.getBooleanExtra("rapid_launch", false)
+        }
+        pending.release.complete(Unit)
+        waitUntil(timeoutMillis = 5_000) {
+            liveCaptureActivities().any { it !== original && !it.isFinishing }
+        }
+        recreatedCapture = liveCaptureActivities().first { it !== original && !it.isFinishing }
+        waitForCaptureResumed(recreatedCapture!!)
+        assertThat(container.repository.appends).containsExactly("captured thought")
+        compose.onNodeWithTag(CAPTURE_INPUT_TAG).assertTextEquals("")
+    }
+
+    @Test
+    fun committedCaptureClosesWithoutWaitingForNotificationRefreshWhichSurvivesItsHost() {
         val suspendedRefresh = SuspendedTestOperation()
         container.notificationRefresher = NotificationRefresher {
             suspendedRefresh.started.complete(Unit)
@@ -133,10 +165,10 @@ class CaptureActivityTest {
         compose.waitUntil(timeoutMillis = 5_000) { suspendedRefresh.started.isCompleted }
 
         assertThat(container.events).contains("clear")
-        assertThat(activity.isFinishing).isFalse()
+        waitUntil(timeoutMillis = 5_000) { activity.isDestroyed }
         assertThat(suspendedRefresh.cancelled.isCompleted).isFalse()
         suspendedRefresh.release.complete(Unit)
-        waitUntil(timeoutMillis = 5_000) { activity.isDestroyed }
+        waitUntil(timeoutMillis = 5_000) { suspendedRefresh.completed.isCompleted }
         assertThat(suspendedRefresh.completed.isCompleted).isTrue()
         assertThat(suspendedRefresh.cancelled.isCompleted).isFalse()
         assertThat(container.repository.appends).containsExactly("captured thought")
@@ -167,7 +199,7 @@ class CaptureActivityTest {
     }
 
     @Test
-    fun preflightRepeatedLaunchSurvivesRecreationAndCompletesExactlyOnce() {
+    fun preflightRepeatedLaunchSurvivesRecreationWithoutSavingUntilScreenOff() {
         val suspendedRead = container.suspendNextSettingsRead()
         val suspendedAppend = container.repository.suspendNextAppend()
         launchCapture()
@@ -187,6 +219,9 @@ class CaptureActivityTest {
 
         scenario?.recreate()
 
+        compose.waitForIdle()
+        assertThat(suspendedAppend.started.isCompleted).isFalse()
+        assertThat(container.completionSignals.simulate(Intent.ACTION_SCREEN_OFF)).isTrue()
         compose.waitUntil(timeoutMillis = 5_000) { suspendedAppend.started.isCompleted }
         suspendedAppend.release.complete(Unit)
         assertThat(suspendedRead.cancelled.isCompleted).isTrue()
@@ -675,7 +710,7 @@ private class FakeCaptureAppContainer : AppContainer {
         zone = ZoneId.of("America/New_York"),
         ioDispatcher = Dispatchers.IO,
         recoveryHandoff = recoveryHandoff,
-        notificationRefresher = notificationRefresher,
+        notificationRefresher = BackgroundNotificationRefresher(notificationRefresher, processScope),
     )
 }
 
@@ -745,6 +780,7 @@ private class FakeRecoveryDraftStore(
 ) : RecoveryDraftStore {
     val mainThreadCalls = AtomicInteger()
     val loads = AtomicInteger()
+    private var hasDraft = true
     var draft = RecoveryDraft(
         text = "captured thought",
         selection = TextRange(16),
@@ -777,7 +813,7 @@ private class FakeRecoveryDraftStore(
                 suspendedLoad = null
             }
         }
-        return RecoveryLoadResult.Draft(draft)
+        return if (hasDraft) RecoveryLoadResult.Draft(draft) else RecoveryLoadResult.Empty
     }
 
     override suspend fun save(draft: RecoveryDraft) {
@@ -795,9 +831,12 @@ private class FakeRecoveryDraftStore(
             }
         }
         events += "save"
+        this.draft = draft
+        hasDraft = true
     }
 
     override suspend fun clear() {
+        hasDraft = false
         recordCallingThread()
         events += "clear"
     }

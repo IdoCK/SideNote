@@ -1,6 +1,17 @@
 package com.sidenote.app.navigation
 
 import android.net.Uri
+import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -10,7 +21,12 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
@@ -316,8 +332,9 @@ fun SideNoteNavHost(
     onOpenProject: (String) -> Unit,
     onOpenSourceDay: (ReviewEntry) -> Unit,
     modifier: Modifier = Modifier,
+    reviewLaunchGeneration: Int = 0,
 ) {
-    var destination by rememberSaveable { mutableStateOf(ProtectedDestination.Review) }
+    var destination by rememberSaveable(reviewLaunchGeneration) { mutableStateOf(ProtectedDestination.Review) }
     val settings = mainState.settings
     LaunchedEffect(settings?.onboardingComplete) {
         if (settings?.onboardingComplete != true) destination = ProtectedDestination.Review
@@ -345,33 +362,89 @@ fun SideNoteNavHost(
             onContinue = onContinueOnboarding,
             modifier = modifier,
         )
-        destination == ProtectedDestination.Settings -> SettingsScreen(
-            settings = settings,
-            folderLabel = settings.treeUri?.folderLabel().orEmpty(),
-            microphoneGranted = permissions.microphoneGranted,
-            notificationsGranted = permissions.notificationsGranted,
-            message = mainState.message,
-            onBack = { destination = ProtectedDestination.Review },
-            onChooseFolder = onChooseFolder,
-            onVoiceOnAtLaunchChange = onVoiceOnAtLaunchChange,
-            onOnlineFallbackChange = onOnlineFallbackChange,
-            onRequestPermissions = onRequestPermissions,
-            modifier = modifier,
-        )
-        else -> ReviewScreen(
-            state = reviewState,
-            onShowDates = onShowDates,
-            onShowProjects = onShowProjects,
-            onPreviousDay = onPreviousDay,
-            onNextDay = onNextDay,
-            onSelectDate = onSelectDate,
-            onOpenSettings = { destination = ProtectedDestination.Settings },
-            onToggleExpanded = onToggleExpanded,
-            onProcessedChange = onProcessedChange,
-            onOpenProject = onOpenProject,
-            onOpenSourceDay = onOpenSourceDay,
-            modifier = modifier,
-        )
+        else -> {
+            BackHandler(enabled = destination == ProtectedDestination.Settings) {
+                destination = ProtectedDestination.Review
+            }
+            // MainActivity removes this entire host when locked. Never animate the unlock gate.
+            Surface(color = Color(0xFF111111), modifier = modifier.fillMaxSize()) {
+                AnimatedContent(
+                    targetState = ProtectedPage(destination, mainState, reviewState, permissions),
+                    contentKey = { it.destination },
+                    modifier = Modifier.fillMaxSize().clipToBounds(),
+                    transitionSpec = {
+                        val direction = if (targetState.destination == ProtectedDestination.Settings) 1 else -1
+                        (slideInHorizontally(tween(220, easing = FastOutSlowInEasing)) {
+                            direction * it / 12
+                        } + fadeIn(tween(220))) togetherWith
+                            (slideOutHorizontally(tween(220, easing = FastOutSlowInEasing)) {
+                                -direction * it / 12
+                            } + fadeOut(tween(150))) using null
+                    },
+                    label = "Review and Settings",
+                ) { page ->
+                    val interactive = page.destination == destination
+                    // Consume outgoing input before descendants; guard callbacks as well so a
+                    // stale accessibility action cannot mutate state during an interrupted exit.
+                    val inputModifier = if (interactive) Modifier else Modifier
+                        .clearAndSetSemantics {}
+                        .onPreviewKeyEvent { true }
+                        .pointerInput(Unit) {
+                            awaitPointerEventScope {
+                                while (true) {
+                                    awaitPointerEvent(PointerEventPass.Initial).changes.forEach { it.consume() }
+                                }
+                            }
+                        }
+                    Box(Modifier.fillMaxSize().then(inputModifier)) {
+                        when (page.destination) {
+                            ProtectedDestination.Settings -> {
+                                val pageSettings = checkNotNull(page.mainState.settings)
+                                SettingsScreen(
+                                    settings = pageSettings,
+                                    folderLabel = pageSettings.treeUri?.folderLabel().orEmpty(),
+                                    microphoneGranted = page.permissions.microphoneGranted,
+                                    notificationsGranted = page.permissions.notificationsGranted,
+                                    message = page.mainState.message,
+                                    onBack = { if (interactive) destination = ProtectedDestination.Review },
+                                    onShowDates = {
+                                        if (interactive) {
+                                            onShowDates()
+                                            destination = ProtectedDestination.Review
+                                        }
+                                    },
+                                    onShowProjects = {
+                                        if (interactive) {
+                                            onShowProjects()
+                                            destination = ProtectedDestination.Review
+                                        }
+                                    },
+                                    onChooseFolder = { if (interactive) onChooseFolder() },
+                                    onVoiceOnAtLaunchChange = { if (interactive) onVoiceOnAtLaunchChange(it) },
+                                    onOnlineFallbackChange = { if (interactive) onOnlineFallbackChange(it) },
+                                    onRequestPermissions = { if (interactive) onRequestPermissions() },
+                                )
+                            }
+                            ProtectedDestination.Review -> ReviewScreen(
+                                state = page.reviewState,
+                                onShowDates = { if (interactive) onShowDates() },
+                                onShowProjects = { if (interactive) onShowProjects() },
+                                onPreviousDay = { if (interactive) onPreviousDay() },
+                                onNextDay = { if (interactive) onNextDay() },
+                                onSelectDate = { if (interactive) onSelectDate(it) },
+                                onOpenSettings = { if (interactive) destination = ProtectedDestination.Settings },
+                                onToggleExpanded = { if (interactive) onToggleExpanded(it) },
+                                onProcessedChange = { entry, processed ->
+                                    if (interactive) onProcessedChange(entry, processed)
+                                },
+                                onOpenProject = { if (interactive) onOpenProject(it) },
+                                onOpenSourceDay = { if (interactive) onOpenSourceDay(it) },
+                            )
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -379,6 +452,13 @@ private enum class ProtectedDestination {
     Review,
     Settings,
 }
+
+private data class ProtectedPage(
+    val destination: ProtectedDestination,
+    val mainState: SideNoteMainState,
+    val reviewState: ReviewState,
+    val permissions: PermissionState,
+)
 
 private fun restoredStep(settings: AppSettings): OnboardingStep = when {
     settings.treeUri == null -> OnboardingStep.Folder

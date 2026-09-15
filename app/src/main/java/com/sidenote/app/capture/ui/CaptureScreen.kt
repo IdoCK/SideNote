@@ -1,12 +1,27 @@
 package com.sidenote.app.capture.ui
 
 import androidx.compose.foundation.background
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.layout.ime
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.IntrinsicSize
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -14,7 +29,10 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.systemBars
+import androidx.compose.foundation.layout.displayCutout
+import androidx.compose.foundation.layout.union
+import com.sidenote.app.capture.VoicePhase
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.BasicTextField
@@ -36,6 +54,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDirection
@@ -71,46 +90,103 @@ fun CaptureScreen(
     onVoiceToggle: () -> Unit,
     onDiscard: () -> Unit,
     onRetryRecovery: () -> Unit = {},
+    onVoicePause: () -> Unit = onVoiceToggle,
 ) {
     CaptureSelectionScope {
+        var typing by remember { mutableStateOf(false) }
+        var keyboardWasVisible by remember { mutableStateOf(false) }
+        val focus = LocalFocusManager.current
+        val keyboard = LocalSoftwareKeyboardController.current
+        val keyboardVisible = WindowInsets.ime.getBottom(LocalDensity.current) > 0
+        val reducedMotion = LocalReducedMotion.current
+        val minimumEditorHeight = (116.dp * LocalDensity.current.fontScale + 28.dp).coerceAtLeast(144.dp)
+        val returnToSpeech = {
+            focus.clearFocus()
+            keyboard?.hide()
+            typing = false
+        }
+        BackHandler(enabled = typing) { returnToSpeech() }
+        LaunchedEffect(keyboardVisible) {
+            if (keyboardWasVisible && !keyboardVisible) returnToSpeech()
+            keyboardWasVisible = keyboardVisible
+        }
         val projects = remember(state.draft.text) {
             ProjectSyntax.tokens(state.draft.text)
         }
         val suggestions = remember(state.draft, state.projectSuggestions) {
             ProjectSuggestionEditor.matches(state.draft, state.projectSuggestions)
         }
-        Column(
+        BoxWithConstraints(
             modifier = Modifier
                 .fillMaxSize()
                 .background(CaptureVisualContract.Background)
                 .testTag(CAPTURE_ROOT_TAG)
-                .windowInsetsPadding(WindowInsets.safeDrawing),
-            horizontalAlignment = Alignment.CenterHorizontally,
+                .windowInsetsPadding(WindowInsets.systemBars.union(WindowInsets.displayCutout)),
         ) {
+            val collapsedHeight = minimumEditorHeight + 128.dp
+            val blobAlpha by animateFloatAsState(
+                targetValue = if (typing) 0f else 1f,
+                animationSpec = tween(if (reducedMotion) 0 else 180),
+                label = "Speech surface visibility",
+            )
+            val voicePhaseText = when (state.voicePhase) {
+                VoicePhase.Starting -> stringResource(R.string.voice_starting)
+                VoicePhase.Listening -> stringResource(R.string.voice_listening)
+                VoicePhase.Processing -> stringResource(R.string.voice_processing)
+                VoicePhase.Retrying -> stringResource(R.string.voice_retrying)
+            }
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .weight(CaptureVisualContract.UpperRegionWeight)
-                    .testTag(CAPTURE_BLOB_REGION_TAG),
+                    .height((maxHeight - collapsedHeight).coerceAtLeast(CaptureVisualContract.BlobSize))
+                    .graphicsLayer { alpha = blobAlpha }
+                    .testTag(CAPTURE_BLOB_REGION_TAG)
+                    .then(if (typing) Modifier.clearAndSetSemantics {} else Modifier),
                 contentAlignment = Alignment.Center,
             ) {
                 VoiceBlob(
                     enabled = state.voiceEnabled,
                     rms = state.rms,
+                    pitch = state.speechPitch,
+                    tone = state.speechTone,
                     reducedMotion = LocalReducedMotion.current,
-                    onToggle = onVoiceToggle,
+                    onToggle = { returnToSpeech(); onVoiceToggle() },
+                    interactive = !typing,
+                    phaseDescription = if (state.voiceEnabled) voicePhaseText else stringResource(R.string.voice_off),
                 )
             }
             Column(
                 modifier = Modifier
+                    .align(Alignment.BottomCenter)
                     .fillMaxWidth()
-                    .weight(CaptureVisualContract.LowerRegionWeight)
+                    .imePadding()
+                    .heightIn(max = collapsedHeight)
+                    .background(CaptureVisualContract.Background)
                     .testTag(CAPTURE_WRITING_REGION_TAG)
                     .verticalScroll(rememberScrollState())
-                    .padding(bottom = 12.dp),
+                    .padding(top = 8.dp, bottom = 16.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.Top,
             ) {
+                // Reserve one small slot: focus/recognition changes never insert a
+                // new row above the editor or shift its text baseline.
+                Box(Modifier.fillMaxWidth().height(48.dp), contentAlignment = Alignment.Center) {
+                    if (typing) {
+                        TextButton(onClick = {
+                            returnToSpeech()
+                            if (!state.voiceEnabled) onVoiceToggle()
+                        }) { Text(stringResource(R.string.capture_back_to_speech), color = CaptureVisualContract.Paper) }
+                    } else if (state.voiceEnabled) {
+                        Text(voicePhaseText, color = CaptureVisualContract.MutedInk, fontSize = 13.sp)
+                    } else if (state.status in setOf(CaptureStatus.Ready, CaptureStatus.SpeechUnavailable)) {
+                        Text(
+                            stringResource(R.string.capture_voice_hint),
+                            color = CaptureVisualContract.Paper,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.fillMaxWidth(CaptureVisualContract.CardWidthFraction),
+                        )
+                    }
+                }
                 val errorMessage = when (state.status) {
                     CaptureStatus.RecoveryUnreadable -> R.string.capture_recovery_unreadable
                     CaptureStatus.SaveFailed -> if (state.recoveryWriteFailed) {
@@ -123,7 +199,6 @@ fun CaptureScreen(
                     } else {
                         R.string.capture_save_uncertain
                     }
-                    CaptureStatus.SpeechUnavailable -> R.string.capture_voice_unavailable
                     else -> if (state.recoveryWriteFailed) R.string.capture_recovery_write_failed else null
                 }
                 errorMessage?.let { message ->
@@ -179,20 +254,22 @@ fun CaptureScreen(
                 WritingCard(
                     state = state,
                     onTextChanged = onTextChanged,
+                    cardHeight = minimumEditorHeight,
+                    alpha = 1f,
+                    onFocus = { focused ->
+                        typing = focused
+                        if (focused && state.voiceEnabled) onVoicePause()
+                    },
                 )
-                if (state.draft.text.isNotEmpty() || state.status == CaptureStatus.RecoveryUnreadable) {
-                    Spacer(Modifier.height(8.dp))
-                    TextButton(
-                        onClick = onDiscard,
-                        modifier = Modifier.heightIn(min = 48.dp),
-                        colors = ButtonDefaults.textButtonColors(
-                            contentColor = CaptureVisualContract.Paper,
-                        ),
-                    ) {
-                        Text(
-                            text = stringResource(R.string.discard),
-                            fontSize = 16.sp,
-                        )
+                Box(Modifier.height(56.dp), contentAlignment = Alignment.Center) {
+                    if (state.draft.text.isNotEmpty() || state.status == CaptureStatus.RecoveryUnreadable) {
+                        TextButton(
+                            onClick = onDiscard,
+                            modifier = Modifier.heightIn(min = 48.dp),
+                            colors = ButtonDefaults.textButtonColors(contentColor = CaptureVisualContract.Paper),
+                        ) {
+                            Text(text = stringResource(R.string.discard), fontSize = 16.sp)
+                        }
                     }
                 }
             }
@@ -204,13 +281,18 @@ fun CaptureScreen(
 private fun WritingCard(
     state: CaptureState,
     onTextChanged: (androidx.compose.ui.text.input.TextFieldValue) -> Unit,
+    cardHeight: androidx.compose.ui.unit.Dp,
+    alpha: Float,
+    onFocus: (Boolean) -> Unit,
 ) {
     Surface(
         modifier = Modifier
             .fillMaxWidth(CaptureVisualContract.CardWidthFraction)
-            .heightIn(min = CaptureVisualContract.CardMinimumHeight)
+            .height(cardHeight)
+            .graphicsLayer { this.alpha = alpha }
             .testTag(CAPTURE_CARD_TAG),
-        color = CaptureVisualContract.Paper,
+        color = CaptureVisualContract.Background,
+        border = BorderStroke(1.dp, CaptureVisualContract.CardBorder),
         contentColor = CaptureVisualContract.Ink,
         shape = CaptureVisualContract.CardShape,
     ) {
@@ -233,7 +315,8 @@ private fun WritingCard(
                 onValueChange = onTextChanged,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(min = 116.dp, max = 224.dp)
+                    .fillMaxSize()
+                    .onFocusChanged { onFocus(it.isFocused) }
                     .testTag(CAPTURE_INPUT_TAG),
                 textStyle = TextStyle(
                     color = CaptureVisualContract.Ink,
@@ -244,7 +327,7 @@ private fun WritingCard(
                 ),
                 cursorBrush = SolidColor(CaptureVisualContract.Ink),
                 minLines = 4,
-                maxLines = 8,
+                maxLines = Int.MAX_VALUE,
             )
         }
     }

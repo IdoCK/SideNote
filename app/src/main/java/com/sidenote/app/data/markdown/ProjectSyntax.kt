@@ -5,7 +5,7 @@ import java.util.Locale
 object ProjectSyntax {
     private const val PROJECT_NAME = "[\\p{L}\\p{M}\\p{N}_-]+"
     private val tokenPattern = Regex("(?<![\\p{L}\\p{M}\\p{N}_])@($PROJECT_NAME)")
-    private val whitespace = Regex("\\s+")
+    private val whitespace = Regex("[ \\t]+")
 
     fun tokens(text: String): List<ProjectToken> {
         val tokensByKey = linkedMapOf<String, ProjectToken>()
@@ -29,7 +29,7 @@ object ProjectSyntax {
             emptySet()
         }
         val commandPattern = Regex(
-            "(?:^|(?<=\\s))$commandPhrase\\s+($PROJECT_NAME)(?=\\s|$)",
+            "(?:^|(?<=\\s))$commandPhrase\\s+($PROJECT_NAME)(?=\\s|[.,!?;:]|$)",
             options,
         )
         val projectsByKey = linkedMapOf<String, String>()
@@ -42,6 +42,8 @@ object ProjectSyntax {
         }
 
         val remainingText = commandPattern.replace(text, " ").trim().replace(whitespace, " ")
+            .replace(Regex(" +(?=[.,!?;:])"), "")
+            .replace(Regex("[ \\t]*\\n[ \\t]*"), "\n")
         return VoiceCommandResult(
             text = remainingText,
             projects = projectsByKey.values.toList(),

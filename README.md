@@ -33,7 +33,11 @@ Focused acceptance gate (quote the `-P` argument in PowerShell):
 
 ### Installable release APK
 
-Run `./gradlew.bat assembleRelease`, then `./scripts/sign-release.ps1` with `JAVA_HOME` and `ANDROID_HOME` set as above. This produces `releases/SideNote-1.0.apk`, verifies its signature and alignment, and uses a dedicated release key rather than the Android debug key. Send that APK to the phone and open it to install.
+Version 1.0.12 refines Review: larger tappable dates replace Previous/Next and Browse dates; white rectangular active tabs span Dates, Projects, and Settings. Notes show wider rotating chevrons only when text overflows, with smooth expansion and collapse. Release build and 226 unit tests pass; Review UI checks pass after updating Settings test scrolling and synchronization. The broader accessibility suite still has an unrelated Capture speech-unavailable message assertion failure.
+
+Run `./gradlew.bat assembleRelease`, then `./scripts/sign-release.ps1` with `JAVA_HOME` and `ANDROID_HOME` set as above. This produces `releases/SideNote-1.0.12.apk`, verifies its signature and alignment, and uses a dedicated release key rather than the Android debug key. Send that APK to the phone and open it to install. Version 1.0.11 preserves rapid activations during saving, finalizes shared audio with EOF, and moves reminder refresh off the capture-close path. See docs/rapid-capture-handoff.md. Version 1.0.10 adds the default-assistant entry point for holding Power to open Capture while locked, without a background gesture detector. See docs/power-button-capture.md. Version 1.0.9 preserves dictated phrases across pauses, adds automatic punctuation with explicit spoken insertion commands, and animates Settings navigation. See docs/continuous-dictation-and-settings.md. It keeps the speech blob static during silence and drives its morphing from live volume, pitch and spectral brightness. A single in-memory microphone stream feeds recognition and analysis; providers that reject it fall back to volume-only feedback. Review notes expand smoothly, days slide directionally, and tabs/project details transition with a short slide and fade. See docs/speech-and-review-motion.md for validation and device limitations. A stable status label distinguishes Starting, Listening, Processing, and Reconnecting. The textbox retains its size and follows Android keyboard insets directly, avoiding competing resize animations and layout jumps on the first transcript. Startup checks no longer block stop taps or physical completion; successful support is reused between utterances. Temporary recognition failures retry with backoff until the user stops capture, while permission/model failures still leave typing available. Selection-only text-field callbacks no longer accidentally stop recognition. Tap-to-speak guidance and the simplified Review remain. The app icon still opens Review; the dedicated Capture shortcut keeps repeated launches in Capture. It includes the duplicate-save fix and SideNote icon, and uses the same signing key as earlier releases so it can update them in place; do not uninstall the release first.
+
+Version 1.0.1 fixes temporary-file MIME naming that prevented saves on Android's external-storage provider, paints the Settings/Review system-bar areas dark, and permits a recognition attempt when a speech provider explicitly reports that it does not implement support queries. Physical Pixel voice transcription is confirmed; Quick Tap before unlock and with the screen off remains unresolved. See [first-use fixes](docs/first-use-fixes.md).
 
 The script creates the signing key once in ignored `.signing/`; never commit or share that directory. Its password is protected with Windows user encryption in `password.xml` (usable only by the same Windows account on this computer). Preserve the key and arrange a secure, portable password backup before migrating computers; losing either prevents signing compatible updates. Build artifacts are ignored too.
 
@@ -45,20 +49,19 @@ The selected folder contains the authoritative notes. It is outside SideNote's p
 
 Configure Pixel 8 Quick Tap:
 
-**Settings → System → Gestures → Quick Tap → Open app → SideNote**
+**Settings → System → Gestures → Quick Tap → Open app → SideNote → Capture**
 
-Enable **Use Quick Tap**, then use the settings icon next to **Open app** to choose SideNote. Google documents Quick Tap as an action to open an app, not an app-specific hardware event. See [Pixel gesture instructions](https://support.google.com/pixelphone/answer/7443425?hl=en).
+Enable **Use Quick Tap**, then use the settings icon next to **Open app** to choose SideNote, then choose its Capture shortcut. The ordinary app icon opens Review. Google documents Quick Tap as an action to open an app, not an app-specific hardware event. See [Pixel gesture instructions](https://support.google.com/pixelphone/answer/7443425?hl=en).
 
 After setup, **Voice on at launch** defaults to on. The grayscale blob toggles listening; typing turns it off. English and Hebrew text, including mixed paragraphs, remain editable. There is no Save/Done control and pausing speech does not save. A non-empty draft saves when:
 
 - The screen turns off (power button or timeout).
 - The accelerometer reports stable face-down placement for at least 750 ms; ordinary handling should not trigger it and requires physical verification.
-- The already-visible Capture activity receives a repeated launch intent.
 - Capture backgrounds after setup prompts have completed (loss-prevention fallback).
 
 Concurrent completion signals pass through one save gate. Success appears only after a confirmed write, followed by one haptic confirmation, `Saved · HH:mm`, and closing Capture. Discard intentionally removes the draft and recovery copy without writing a note.
 
-Lock-screen launch depends on Pixel/Android policy; unfinished setup requires unlock. Capture exposes only the active capture/recovery draft. Review, previous days, Projects, Settings, and folder choice require unlock. A **second Quick Tap** saves only if the Pixel launcher delivers a new intent to the single-top Capture activity. This is not yet verified on a physical Pixel 8. If unsupported, use screen-off or stable face-down; SideNote does not request an accessibility service or modify the launcher.
+Lock-screen launch depends on Pixel/Android policy; unfinished setup requires unlock. Capture exposes only the active capture/recovery draft. Review, previous days, Projects, Settings, and folder choice require unlock. Repeated Capture launches keep the current draft open; they no longer save it. The physical Pixel does not deliver Quick Tap while its screen is off. The user chose minimal background use, so SideNote does not run an always-on tap detector, hold a wake lock, or request overlay/accessibility access. Screen-off back-tap capture remains unsupported by the current system gesture route.
 
 ## Voice processing and privacy
 

@@ -6,6 +6,12 @@ import org.junit.Test
 
 class ProjectSyntaxTest {
     @Test
+    fun formattedProjectCommandKeepsSentencePunctuationAndParagraphs() {
+        val result = ProjectSyntax.extractVoiceCommand("Buy paint tag project Home.\n\nThen call Sam.", Locale.ENGLISH)
+        assertThat(result.projects).containsExactly("Home")
+        assertThat(result.text).isEqualTo("Buy paint.\n\nThen call Sam.")
+    }
+    @Test
     fun extractsUnicodeTagsAndExplicitHebrewCommand() {
         assertThat(ProjectSyntax.tokens("@SideNote וגם @שיפוץ-הבית").map { it.display })
             .containsExactly("SideNote", "שיפוץ-הבית")

@@ -308,7 +308,7 @@ class SafTextDocumentStoreTest {
             DocumentsContract.createDocument(
                 context.contentResolver,
                 rawRoot().uri,
-                "text/plain",
+                "application/octet-stream",
                 name,
             ),
         )

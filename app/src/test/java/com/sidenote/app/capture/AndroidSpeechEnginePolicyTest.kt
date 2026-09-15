@@ -21,6 +21,106 @@ import org.junit.Test
 @OptIn(ExperimentalCoroutinesApi::class)
 class AndroidSpeechEnginePolicyTest {
     @Test
+    fun speechAfterAPauseKeepsCommittedSegmentsAndRevisesOnlyTheCurrentPhrase() {
+        val factory = FakeRecognitionSessionFactory()
+        val engine = AndroidSpeechEngine(false, factory)
+        val listener = RecordingSpeechListener()
+        engine.start(listener)
+        val session = factory.created.last()
+        session.emitPartial("First thought")
+        session.emitSegment("First thought.")
+        session.emitPartial("Second")
+        session.emitPartial("Second thought")
+        assertThat(listener.partials.last()).isEqualTo("First thought. Second thought")
+        session.emitSegment("Second thought.")
+        session.emitPartial("Third thought")
+        session.emitSegmentedEnd()
+        assertThat(listener.finals).containsExactly("First thought. Second thought. Third thought")
+        assertThat(session.destroyCount).isEqualTo(1)
+    }
+
+    @Test
+    fun repeatedSpokenSegmentsArePreservedAndLateSegmentsAreIgnored() {
+        val factory = FakeRecognitionSessionFactory()
+        val engine = AndroidSpeechEngine(false, factory)
+        val listener = RecordingSpeechListener()
+        engine.start(listener)
+        val session = factory.created.last()
+        session.emitSegment("Yes.")
+        session.emitSegment("Yes.")
+        session.emitSegmentedEnd()
+        session.emitSegment("late")
+        assertThat(listener.finals).containsExactly("Yes. Yes.")
+        assertThat(listener.partials.last()).isEqualTo("Yes. Yes.")
+    }
+    @Test
+    fun measuredAudioFeaturesAreDeliveredOnlyFromTheCurrentSession() {
+        val factory = FakeRecognitionSessionFactory()
+        val engine = AndroidSpeechEngine(false, factory)
+        val listener = RecordingSpeechListener()
+        engine.start(listener)
+        val oldSession = factory.created.last()
+        val measured = SpeechAudioFeatures(0.7f, 0.3f, 0.8f)
+        oldSession.emitFeatures(measured)
+        assertThat(listener.features).containsExactly(measured)
+        engine.stop()
+        oldSession.emitFeatures(SpeechAudioFeatures(1f, 1f, 1f))
+        engine.start(listener)
+        oldSession.emitFeatures(SpeechAudioFeatures(1f, 1f, 1f))
+        factory.created.last().emitFeatures(SpeechAudioFeatures())
+        assertThat(listener.features).containsExactly(measured, SpeechAudioFeatures()).inOrder()
+        engine.destroy()
+    }
+    @Test
+    fun serviceWithoutSupportQueryCanStillTranscribeLocally() = runTest {
+        val probe = CompletableDeferred<RecognitionSupportSnapshot>()
+        probe.completeExceptionally(RecognitionSupportException(SpeechRecognizer.ERROR_CANNOT_CHECK_SUPPORT))
+        val factory = FakeRecognitionSessionFactory(firstLocalSupport = probe)
+        val engine = AndroidSpeechEngine(false, factory)
+        assertThat(engine.support()).isEqualTo(SpeechAvailability.Available)
+        val listener = RecordingSpeechListener()
+        engine.start(listener)
+        factory.created.last().emitFinal("actual transcription")
+        assertThat(listener.finals).containsExactly("actual transcription")
+        assertThat(factory.created.last().attempt).isEqualTo(Attempt.Local)
+        engine.destroy()
+    }
+
+    @Test
+    fun supportQueryPermissionFailureStillBlocksRecognition() = runTest {
+        val probe = CompletableDeferred<RecognitionSupportSnapshot>()
+        probe.completeExceptionally(RecognitionSupportException(SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS))
+        val factory = FakeRecognitionSessionFactory(firstLocalSupport = probe)
+        val engine = AndroidSpeechEngine(false, factory)
+        assertThat(engine.support()).isEqualTo(SpeechAvailability.TypedOnly)
+        val listener = RecordingSpeechListener()
+        engine.start(listener)
+        assertThat(listener.failures).containsExactly(SpeechFailure.LanguageNotSupported)
+        engine.destroy()
+    }
+
+    @Test
+    fun defaultServiceWithoutSupportQueryCanTranscribeAfterConsent() = runTest {
+        val probe = CompletableDeferred<RecognitionSupportSnapshot>()
+        probe.completeExceptionally(RecognitionSupportException(SpeechRecognizer.ERROR_CANNOT_CHECK_SUPPORT))
+        val sessions = mutableListOf<FakeRecognitionSession>()
+        val factory = RecognitionSessionFactory { attempt ->
+            FakeRecognitionSession(
+                attempt, RecognitionSupportSnapshot(),
+                firstSupport = if (attempt == Attempt.Online) probe else null,
+            ).also(sessions::add)
+        }
+        val engine = AndroidSpeechEngine(true, factory)
+        assertThat(engine.support()).isEqualTo(SpeechAvailability.Available)
+        val listener = RecordingSpeechListener()
+        engine.start(listener)
+        sessions.last().emitFinal("hello שלום")
+        assertThat(listener.finals).containsExactly("hello שלום")
+        assertThat(sessions.last().attempt).isEqualTo(Attempt.Online)
+        engine.destroy()
+    }
+
+    @Test
     fun installedOnlyLanguagesAreReadyButDownloadableOnlyAreNot() = runTest {
         val installed = AndroidSpeechEngine(false, FakeRecognitionSessionFactory(
             localSupport = RecognitionSupportSnapshot(installedOnDeviceLanguages = setOf("en-US", "he-IL")),
@@ -723,6 +823,10 @@ private class FakeRecognitionSession(
 
     fun emitRms(rmsDb: Float) = listener?.onRmsChanged(rmsDb) ?: Unit
 
+    fun emitFeatures(features: SpeechAudioFeatures) = listener?.onAudioFeatures(features) ?: Unit
+    fun emitSegment(text: String) = listener?.onSegment(text) ?: Unit
+    fun emitSegmentedEnd() = listener?.onSegmentedSessionEnded() ?: Unit
+
     fun emitDetectedLanguage(languageTag: String) =
         listener?.onDetectedLanguage(languageTag) ?: Unit
 
@@ -784,6 +888,8 @@ private class DedicatedSpeechMainThread : SpeechMainThread, AutoCloseable {
 }
 
 private class RecordingSpeechListener : SpeechEngine.Listener {
+    val features = mutableListOf<SpeechAudioFeatures>()
+    override fun onAudioFeatures(features: SpeechAudioFeatures) { this.features += features }
     val partials = mutableListOf<String>()
     val finals = mutableListOf<String>()
     val rmsValues = mutableListOf<Float>()

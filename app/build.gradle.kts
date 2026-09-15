@@ -11,8 +11,8 @@ android {
         applicationId = "com.sidenote.app"
         minSdk = 34
         targetSdk = 37
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 13
+        versionName = "1.0.12"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 

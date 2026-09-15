@@ -231,8 +231,8 @@ private fun OnlineFallbackToggle(
 @Composable
 private fun QuickTapStep(onContinue: () -> Unit) {
     Text("Set up Quick Tap on your Pixel")
-    Text("Settings → System → Gestures → Quick Tap → Open app → SideNote")
-    Text("After setup, Quick Tap can open the capture screen.", color = Color(0xFFAAA7A0))
+    Text("Settings → System → Gestures → Quick Tap → Open app → SideNote → Capture")
+    Text("Choose the Capture shortcut using the settings icon next to SideNote. The SideNote app icon opens Review. Pixel controls whether Quick Tap is available while locked or with the screen off.", color = Color(0xFFAAA7A0))
     Button(
         onClick = onContinue,
         modifier = Modifier.fillMaxWidth().sizeIn(minHeight = 48.dp),
@@ -244,7 +244,7 @@ private fun QuickTapStep(onContinue: () -> Unit) {
 private fun SpeechPreparationState.description(): String = when (this) {
     SpeechPreparationState.Idle -> "Speech support has not been checked yet."
     SpeechPreparationState.Checking -> "Checking English and Hebrew…"
-    SpeechPreparationState.Available -> "English and Hebrew are available."
+    SpeechPreparationState.Available -> "Speech service ready. Try English and Hebrew in Capture."
     SpeechPreparationState.TypedOnly -> "One or both languages need a model or service. Typing still works."
     SpeechPreparationState.Downloading -> "Requesting supported speech model downloads…"
     SpeechPreparationState.DownloadRequested -> "Supported speech model downloads were requested."

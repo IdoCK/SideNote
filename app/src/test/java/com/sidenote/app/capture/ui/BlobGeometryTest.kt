@@ -11,23 +11,25 @@ import org.junit.Test
 
 class BlobGeometryTest {
     @Test
-    fun zeroRmsIsAPerfectFilledCircleAtEveryPhase() {
-        listOf(0f, 0.7f, 2.4f).forEach { phase ->
-            val geometry = BlobGeometry.from(
-                rms = 0f,
-                phase = phase,
-                enabled = true,
-                reducedMotion = false,
-            )
-
-            assertThat(geometry.paint).isEqualTo(BlobPaint.Filled)
-            assertThat(geometry.isCircle).isTrue()
-            assertThat(geometry.radiusScales).containsExactlyElementsIn(
-                List(BlobGeometry.POINT_COUNT) { 1f },
-            ).inOrder()
+    fun measuredPitchAndToneChangeTheContourAtTheSameVolume() {
+        val low = BlobGeometry.from(0.6f, 1.2f, true, false, pitch = 0.1f, tone = 0.1f)
+        val high = BlobGeometry.from(0.6f, 1.2f, true, false, pitch = 0.9f, tone = 0.1f)
+        val bright = BlobGeometry.from(0.6f, 1.2f, true, false, pitch = 0.1f, tone = 0.9f)
+        assertThat(low.radiusScales).isNotEqualTo(high.radiusScales)
+        assertThat(low.radiusScales).isNotEqualTo(bright.radiusScales)
+    }
+    @Test
+    fun quietListeningIsStatic() {
+        val first = BlobGeometry.from(0f, 0f, true, false)
+        val next = BlobGeometry.from(0f, 1.2f, true, false)
+        assertThat(first.paint).isEqualTo(BlobPaint.Filled)
+        assertThat(first.isCircle).isTrue()
+        assertThat(next.radiusScales).isEqualTo(first.radiusScales)
+        (first.radiusScales + next.radiusScales).forEach {
+            assertThat(it).isAtMost(1.28f)
+            assertThat(it).isGreaterThan(0.7f)
         }
     }
-
     @Test
     fun disabledVoiceIsAHollowCircleRegardlessOfRmsOrPhase() {
         val geometry = BlobGeometry.from(
@@ -53,95 +55,42 @@ class BlobGeometryTest {
         assertThat(geometry.isCircle).isFalse()
         assertThat(geometry.radiusScales.distinct().size).isGreaterThan(1)
         geometry.radiusScales.forEach { scale ->
-            assertThat(scale).isAtLeast(0.96f)
-            assertThat(scale).isAtMost(1.08f)
+            assertThat(scale).isAtLeast(0.72f)
+            assertThat(scale).isAtMost(1.28f)
         }
     }
 
     @Test
-    fun belowAndAtSpeechThresholdStayCircularWhileAboveThresholdDeforms() {
-        listOf(
-            0f,
-            CaptureVisualContract.BlobSpeechThreshold - 0.001f,
-            CaptureVisualContract.BlobSpeechThreshold,
-        ).forEach { rms ->
-            assertThat(
-                BlobGeometry.from(
-                    rms = rms,
-                    phase = 0f,
-                    enabled = true,
-                    reducedMotion = false,
-                ).isCircle,
-            ).isTrue()
+    fun crossingSpeechThresholdDoesNotSnapTheLiquidContour() {
+        val below = BlobGeometry.from(0.199f, 1f, true, false)
+        val above = BlobGeometry.from(0.201f, 1f, true, false)
+        below.radiusScales.zip(above.radiusScales).forEach { (a, b) ->
+            assertThat(abs(a - b)).isLessThan(0.01f)
         }
-
-        assertThat(
-            BlobGeometry.from(
-                rms = CaptureVisualContract.BlobSpeechThreshold + 0.001f,
-                phase = 0f,
-                enabled = true,
-                reducedMotion = false,
-            ).isCircle,
-        ).isFalse()
     }
-
     @Test
-    fun fullSpeechGeometryHasExactlyFourLobesAndClosedCubicControls() {
-        val geometry = BlobGeometry.from(
-            rms = 1f,
-            phase = 0f,
-            enabled = true,
-            reducedMotion = false,
-        )
-
-        val maxima = geometry.radiusScales.indices.filter { index ->
-            val previous = geometry.radiusScales[
-                (index - 1 + geometry.radiusScales.size) % geometry.radiusScales.size
-            ]
-            val next = geometry.radiusScales[(index + 1) % geometry.radiusScales.size]
-            geometry.radiusScales[index] > previous && geometry.radiusScales[index] > next
-        }
-        val minima = geometry.radiusScales.indices.filter { index ->
-            val previous = geometry.radiusScales[
-                (index - 1 + geometry.radiusScales.size) % geometry.radiusScales.size
-            ]
-            val next = geometry.radiusScales[(index + 1) % geometry.radiusScales.size]
-            geometry.radiusScales[index] < previous && geometry.radiusScales[index] < next
-        }
-        assertThat(maxima).containsExactly(0, 4, 8, 12).inOrder()
-        assertThat(minima).containsExactly(2, 6, 10, 14).inOrder()
-        maxima.forEach { index ->
-            assertThat(geometry.radiusScales[index]).isWithin(0.0001f).of(1.08f)
-        }
-        minima.forEach { index ->
-            assertThat(geometry.radiusScales[index]).isWithin(0.0001f).of(0.96f)
-        }
-
-        val segments = geometry.cubicSegments
-        assertThat(segments).hasSize(16)
-        assertThat(segments.last().end).isEqualTo(segments.first().start)
-        segments.indices.forEach { index ->
-            assertThat(segments[index].end)
-                .isEqualTo(segments[(index + 1) % segments.size].start)
-        }
-        assertThat(segments.first().start.x).isWithin(0.0001f).of(1.08f)
-        assertThat(segments.first().start.y).isWithin(0.0001f).of(0f)
-        assertThat(segments.first().control1.x).isWithin(0.0001f).of(1.08f)
-        assertThat(segments.first().control1.y).isWithin(0.0005f).of(0.1301f)
-        assertThat(segments.first().control2.x).isWithin(0.0005f).of(1.0092f)
-        assertThat(segments.first().control2.y).isWithin(0.0005f).of(0.2772f)
-        segments.flatMap { segment ->
-            listOf(segment.start, segment.control1, segment.control2, segment.end)
-        }.forEach { point ->
-            assertThat(abs(point.x)).isAtMost(1.08f)
-            assertThat(abs(point.y)).isAtMost(1.08f)
+    fun liquidContourIsClosedSmoothAndBoundedThroughoutItsCycle() {
+        repeat(80) { frame ->
+            val geometry = BlobGeometry.from(1f, frame * 0.08f, true, false)
+            val segments = geometry.cubicSegments
+            assertThat(segments.last().end).isEqualTo(segments.first().start)
+            segments.indices.forEach { index ->
+                val a = segments[index]
+                val b = segments[(index + 1) % segments.size]
+                assertThat(a.end).isEqualTo(b.start)
+                assertThat(a.end.x - a.control2.x).isWithin(0.0001f).of(b.control1.x - b.start.x)
+                assertThat(a.end.y - a.control2.y).isWithin(0.0001f).of(b.control1.y - b.start.y)
+                listOf(a.start, a.control1, a.control2).forEach { point ->
+                    assertThat(abs(point.x)).isAtMost(1.28f)
+                    assertThat(abs(point.y)).isAtMost(1.28f)
+                }
+            }
         }
     }
-
     @Test
     fun sharedVisualContractProducesApprovedBlobCardAndFourDpOutline() {
-        assertThat(CaptureVisualContract.BlobSize.value).isEqualTo(132f)
-        assertThat(CaptureVisualContract.CardWidthFraction).isEqualTo(0.84f)
+        assertThat(CaptureVisualContract.BlobSize.value).isEqualTo(220f)
+        assertThat(CaptureVisualContract.CardWidthFraction).isEqualTo(0.90f)
         assertThat(CaptureVisualContract.TextSelectionColors.handleColor)
             .isEqualTo(Color(0xFFF3F0E8))
         assertThat(CaptureVisualContract.TextSelectionColors.backgroundColor)

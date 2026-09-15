@@ -183,7 +183,7 @@ class AccessibilityAndBidiTest {
         compose.onNodeWithContentDescription("Voice input off").assertIsOff()
     }
 
-    @Test fun actualReviewAtFontScaleTwoHasIsolatedTimeExpandableBodyAndButtonDayNavigation() {
+    @Test fun actualReviewAtFontScaleTwoHasIsolatedTimeExpandableBodyAndClickableDateNavigation() {
         fixture.seed("2026-08-26.md", "# 2026-08-26\n\n- [ ] **09:05** English first\n")
         fixture.seed("2026-08-27.md", "# 2026-08-27\n\n- [ ] **18:26** רעיון חדש @SideNote 42\n  English continuation\n")
         scenario = ActivityScenario.launch(MainActivity::class.java)
@@ -211,9 +211,9 @@ class AccessibilityAndBidiTest {
             val body = compose.onNodeWithText("רעיון חדש @SideNote 42\nEnglish continuation")
             body.performScrollTo().assertIsDisplayed()
             assertThat(layout(body).hasVisualOverflow).isFalse()
-            compose.onNodeWithContentDescription("Previous day").performClick()
+            compose.onNodeWithContentDescription("Open date 2026-08-26").performClick()
             compose.onNodeWithText("English first").assertIsDisplayed()
-            compose.onNodeWithContentDescription("Next day").performClick()
+            compose.onNodeWithContentDescription("Open date 2026-08-27").performClick()
             compose.onNodeWithTag("$REVIEW_TIMESTAMP_TAG.0").assertTextEquals("\u206618:26\u2069")
         } finally {
             scenario!!.onActivity { activity ->

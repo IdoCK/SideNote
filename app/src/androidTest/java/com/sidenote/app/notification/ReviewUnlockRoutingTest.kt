@@ -100,8 +100,8 @@ class ReviewUnlockRoutingTest {
             .manifestShortcuts
         assertThat(shortcuts.map { it.id }).contains("review")
         val shortcutIntent = shortcuts.first { it.id == "review" }.intent!!
-        assertThat(shortcutIntent.component?.className).isEqualTo(CaptureActivity::class.java.name)
-        captureScenario = ActivityScenario.launch(shortcutIntent.addFlags(
+        assertThat(shortcutIntent.component?.className).isEqualTo(MainActivity::class.java.name)
+        mainScenario = ActivityScenario.launch(shortcutIntent.addFlags(
             Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK,
         ))
         compose.onNodeWithContentDescription("Settings").performClick()
@@ -134,7 +134,7 @@ class ReviewUnlockRoutingTest {
 
         compose.waitUntil(timeoutMillis = 5_000) { fake.repository.daysCalls.get() >= 2 }
         compose.onNodeWithText("edited outside").assertIsDisplayed()
-        compose.onNodeWithContentDescription("Next day").performClick()
+        compose.onNodeWithContentDescription("Open date 2026-08-28").performClick()
         compose.onNodeWithText("added outside").assertIsDisplayed()
         compose.onNodeWithText("delete me").assertDoesNotExist()
         assertThat(fake.repository.daysCalls.get()).isEqualTo(2)
@@ -187,9 +187,10 @@ class ReviewUnlockRoutingTest {
         assertThat(fake.notificationScheduler.enqueueCalls.get()).isEqualTo(0)
 
         mainScenario?.recreate()
-        repeat(2) {
+        repeat(2) { repeatIndex ->
             targetContext.startActivity(
                 Intent(targetContext, MainActivity::class.java)
+                    .putExtra("notification_repeat_index", repeatIndex)
                     .putExtra(MainActivity.EXTRA_OPEN_MOST_RECENT_UNPROCESSED, true)
                     .addFlags(
                         Intent.FLAG_ACTIVITY_NEW_TASK or
@@ -198,7 +199,11 @@ class ReviewUnlockRoutingTest {
                     ),
             )
         }
-        compose.waitUntil(timeoutMillis = 5_000) { fake.lockState.dismissRequests.get() >= 2 }
+        compose.waitUntil(timeoutMillis = 5_000) {
+            var delivered = false
+            mainScenario?.onActivity { delivered = it.intent.getIntExtra("notification_repeat_index", -1) == 1 }
+            delivered
+        }
         assertThat(fake.mainDependenciesCalls.get()).isEqualTo(0)
         assertThat(fake.repository.daysCalls.get()).isEqualTo(0)
 

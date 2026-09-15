@@ -73,6 +73,8 @@ class SpeechIntentTest {
         assertThat(intent.getStringExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL))
             .isEqualTo(RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
         assertThat(intent.getBooleanExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)).isTrue()
+        assertThat(intent.getStringExtra(RecognizerIntent.EXTRA_ENABLE_FORMATTING))
+            .isEqualTo(RecognizerIntent.FORMATTING_OPTIMIZE_QUALITY)
         assertThat(intent.getBooleanExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, false)).isTrue()
         assertThat(intent.getBooleanExtra(RecognizerIntent.EXTRA_ENABLE_LANGUAGE_DETECTION, false)).isTrue()
         assertThat(intent.getStringExtra(RecognizerIntent.EXTRA_ENABLE_LANGUAGE_SWITCH))

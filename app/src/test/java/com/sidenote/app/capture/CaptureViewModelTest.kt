@@ -22,6 +22,7 @@ import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -171,6 +172,188 @@ class CaptureViewModelTest {
         advanceUntilIdle()
         assertThat(viewModel.state.value.status).isEqualTo(CaptureStatus.Discarded)
         assertThat(recovery.clearCount).isEqualTo(1)
+    }
+
+    @Test
+    fun repeatedStartDoesNotReplaceAnActiveRecognitionSession() = runTest(mainDispatcher) {
+        val speech = SessionRecordingSpeechEngine()
+        val viewModel = viewModel(speech, this)
+        viewModel.start(Intent())
+        viewModel.onCaptureStarted()
+        advanceUntilIdle()
+        viewModel.onCaptureStarted()
+        advanceUntilIdle()
+        assertThat(speech.listeners).hasSize(1)
+    }
+
+    @Test
+    fun transientBusyRetriesWithoutRequiringMoreCircleTaps() = runTest(mainDispatcher) {
+        val speech = SessionRecordingSpeechEngine()
+        val viewModel = viewModel(speech, this)
+        viewModel.start(Intent())
+        viewModel.onCaptureStarted()
+        advanceUntilIdle()
+        repeat(5) {
+            speech.listeners.last().onUnavailable(SpeechFailure.Busy)
+            advanceUntilIdle()
+            assertThat(viewModel.state.value.voiceEnabled).isTrue()
+        }
+        assertThat(speech.listeners).hasSize(6)
+        speech.listeners.last().onPartial("working on the first activation")
+        runCurrent()
+        assertThat(viewModel.state.value.draft.text).isEqualTo("working on the first activation")
+        viewModel.onVoiceToggle()
+        advanceUntilIdle()
+        assertThat(viewModel.state.value.voiceEnabled).isFalse()
+        assertThat(speech.listeners).hasSize(6)
+    }
+
+    @Test
+    fun repeatedStartDuringSupportLookupDoesNotStrandListeningIntent() = runTest(mainDispatcher) {
+        val gate = CompletableDeferred<SpeechAvailability>()
+        val speech = SessionRecordingSpeechEngine().apply { supportGate = gate }
+        val viewModel = viewModel(speech, this)
+        viewModel.start(Intent())
+        viewModel.onCaptureStarted()
+        runCurrent()
+        viewModel.onCaptureStarted()
+        runCurrent()
+        gate.complete(SpeechAvailability.Available)
+        advanceUntilIdle()
+        assertThat(speech.listeners).hasSize(1)
+        speech.listeners.single().onPartial("still listening")
+        runCurrent()
+        assertThat(viewModel.state.value.draft.text).isEqualTo("still listening")
+    }
+
+    @Test
+    fun stopTapDoesNotWaitForSupportAndLateSupportCannotStartMicrophone() = runTest(mainDispatcher) {
+        val gate = CompletableDeferred<SpeechAvailability>()
+        val speech = SessionRecordingSpeechEngine().apply { supportGate = gate }
+        val viewModel = viewModel(speech, this)
+        viewModel.start(Intent())
+        viewModel.onCaptureStarted()
+        runCurrent()
+        viewModel.onVoiceToggle()
+        runCurrent()
+        assertThat(viewModel.state.value.voiceEnabled).isFalse()
+        gate.complete(SpeechAvailability.Available)
+        advanceUntilIdle()
+        assertThat(speech.listeners).isEmpty()
+    }
+
+    @Test
+    fun completedUtteranceDoesNotRecheckSupportAndLoseNextSentence() = runTest(mainDispatcher) {
+        val speech = SessionRecordingSpeechEngine()
+        val viewModel = viewModel(speech, this)
+        viewModel.start(Intent())
+        viewModel.onCaptureStarted()
+        advanceUntilIdle()
+        speech.supportGate = CompletableDeferred()
+        speech.listeners.last().onFinal("first sentence")
+        advanceTimeBy(1000)
+        runCurrent()
+        assertThat(speech.listeners).hasSize(2)
+        speech.listeners.last().onFinal("second sentence")
+        runCurrent()
+        assertThat(viewModel.state.value.draft.text).isEqualTo("first sentence second sentence")
+        viewModel.onCaptureStopped(false)
+        advanceUntilIdle()
+    }
+
+    @Test
+    fun physicalCompletionDoesNotWaitForStartupSupport() = runTest(mainDispatcher) {
+        listOf(CompletionSignal.ScreenOff, CompletionSignal.FaceDown).forEach { signal ->
+            val speech = SessionRecordingSpeechEngine().apply { supportGate = CompletableDeferred() }
+            val viewModel = viewModel(speech, this)
+            viewModel.start(Intent())
+            runCurrent()
+            viewModel.onUserEdit(TextFieldValue("keep this"))
+            runCurrent()
+            viewModel.onCaptureStarted()
+            viewModel.onVoiceToggle()
+            runCurrent()
+            viewModel.complete(signal)
+            runCurrent()
+            assertThat(viewModel.state.value.status).isEqualTo(CaptureStatus.Saved)
+            advanceUntilIdle()
+            assertThat(speech.listeners).isEmpty()
+        }
+    }
+
+    @Test
+    fun focusPauseIsIdempotentAndCannotToggleVoiceBackOn() = runTest(mainDispatcher) {
+        val speech = SessionRecordingSpeechEngine()
+        val viewModel = viewModel(speech, this)
+        viewModel.start(Intent())
+        viewModel.onCaptureStarted()
+        advanceUntilIdle()
+        viewModel.onVoicePause()
+        viewModel.onVoicePause()
+        advanceUntilIdle()
+        assertThat(viewModel.state.value.voiceEnabled).isFalse()
+        assertThat(speech.listeners).hasSize(1)
+    }
+
+    @Test
+    fun lateReadyCannotShowListeningAfterStopAndPermissionFailureIsNotRetried() = runTest(mainDispatcher) {
+        val speech = SessionRecordingSpeechEngine()
+        val viewModel = viewModel(speech, this)
+        viewModel.start(Intent())
+        viewModel.onCaptureStarted()
+        advanceUntilIdle()
+        val listener = speech.listeners.single()
+        listener.onReady()
+        runCurrent()
+        assertThat(viewModel.state.value.voicePhase).isEqualTo(VoicePhase.Listening)
+        listener.onUnavailable(SpeechFailure.Permission)
+        runCurrent()
+        val stopped = viewModel.state.value
+        listener.onReady()
+        listener.onPartial("late")
+        advanceUntilIdle()
+        assertThat(viewModel.state.value).isEqualTo(stopped)
+        assertThat(stopped.voiceEnabled).isFalse()
+        assertThat(speech.listeners).hasSize(1)
+    }
+
+    @Test
+    fun supportTimeoutCanRecoverWithoutAnotherTap() = runTest(mainDispatcher) {
+        val gate = CompletableDeferred<SpeechAvailability>()
+        val speech = SessionRecordingSpeechEngine().apply { supportGate = gate }
+        val viewModel = viewModel(speech, this)
+        viewModel.start(Intent())
+        viewModel.onCaptureStarted()
+        runCurrent()
+        advanceTimeBy(3100)
+        runCurrent()
+        assertThat(viewModel.state.value.voiceEnabled).isTrue()
+        assertThat(viewModel.state.value.voicePhase).isEqualTo(VoicePhase.Retrying)
+        gate.complete(SpeechAvailability.Available)
+        advanceTimeBy(1500)
+        runCurrent()
+        assertThat(speech.listeners).hasSize(1)
+        speech.listeners.single().onPartial("recovered")
+        runCurrent()
+        assertThat(viewModel.state.value.draft.text).isEqualTo("recovered")
+        viewModel.onVoicePause()
+        advanceUntilIdle()
+    }
+
+    @Test
+    fun temporaryNetworkFailureKeepsListeningIntentAndStopCancelsRetry() = runTest(mainDispatcher) {
+        val speech = SessionRecordingSpeechEngine()
+        val viewModel = viewModel(speech, this)
+        viewModel.start(Intent())
+        viewModel.onCaptureStarted()
+        advanceUntilIdle()
+        speech.listeners.last().onUnavailable(SpeechFailure.Network)
+        runCurrent()
+        assertThat(viewModel.state.value.voiceEnabled).isTrue()
+        viewModel.onVoiceToggle()
+        advanceUntilIdle()
+        assertThat(speech.listeners).hasSize(1)
+        assertThat(viewModel.state.value.voiceEnabled).isFalse()
     }
 
     @Test
@@ -496,10 +679,11 @@ private class SessionRecordingSpeechEngine : SpeechEngine {
     val listeners = mutableListOf<SpeechEngine.Listener>()
     var onFinish: () -> Unit = {}
     var availability = SpeechAvailability.Available
+    var supportGate: CompletableDeferred<SpeechAvailability>? = null
 
     override suspend fun finish() = onFinish()
 
-    override suspend fun support(): SpeechAvailability = availability
+    override suspend fun support(): SpeechAvailability = supportGate?.await() ?: availability
 
     override suspend fun requestModelDownloads() = Unit
 

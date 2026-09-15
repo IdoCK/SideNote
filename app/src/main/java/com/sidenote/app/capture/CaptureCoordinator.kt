@@ -63,12 +63,18 @@ class CaptureCoordinator(
         val shouldStop = synchronized(transitionLock) {
             val current = mutableState.value
             if (!acceptsInput(current)) return
+            // Focus/selection updates can arrive after a voice tap. Only a text edit
+            // is a switch to typing; a late selection callback must not stop the mic.
+            if (current.draft.text == value.text) {
+                publishState(current.copy(draft = value))
+                return@synchronized false
+            }
             publishState(
                 current.copy(
                     draft = value,
                     voiceEnabled = false,
                     speechOwnedRange = null,
-                    rms = 0f,
+                    rms = 0f, speechPitch = 0f, speechTone = 0f,
                     status = CaptureStatus.Ready,
                 ),
             )
@@ -88,7 +94,9 @@ class CaptureCoordinator(
     }
 
     fun onProjectSuggestions(projects: List<ProjectToken>) = synchronized(transitionLock) {
-        if (!terminal) publishState(mutableState.value.copy(projectSuggestions = projects))
+        // Suggestions are auxiliary UI state. Clearing them on lock must not invalidate
+        // the draft revision being committed, leaving a written note eligible for retry.
+        if (!terminal) mutableState.value = mutableState.value.copy(projectSuggestions = projects)
     }
 
     fun onVoiceToggle() {
@@ -100,7 +108,7 @@ class CaptureCoordinator(
                     current.copy(
                         voiceEnabled = false,
                         speechOwnedRange = null,
-                        rms = 0f,
+                        rms = 0f, speechPitch = 0f, speechTone = 0f,
                         status = CaptureStatus.Ready,
                     ),
                 )
@@ -118,17 +126,27 @@ class CaptureCoordinator(
         if (shouldStop) speech.stop()
     }
 
+    fun onSpeechPhase(phase: VoicePhase) = synchronized(transitionLock) {
+        val current = mutableState.value
+        if (acceptsSpeech(current)) {
+            // Feedback is not a draft revision and cannot invalidate an in-flight save.
+            if (current.voicePhase != phase) {
+                mutableState.value = current.copy(voicePhase = phase, rms = 0f, speechPitch = 0f, speechTone = 0f)
+            }
+        }
+    }
+
     fun onSpeechPartial(text: String) {
         synchronized(transitionLock) {
             if (!acceptsSpeech(mutableState.value)) return
-            replaceSpeechOwnedSpan(text, final = false)
+            replaceSpeechOwnedSpan(SpeechPunctuation.format(text), final = false)
         }
     }
 
     fun onSpeechFinal(text: String, locale: Locale) {
         synchronized(transitionLock) {
             if (!acceptsSpeech(mutableState.value)) return
-            val command = ProjectSyntax.extractVoiceCommand(text, locale)
+            val command = ProjectSyntax.extractVoiceCommand(SpeechPunctuation.format(text), locale)
             val visibleText = buildList {
                 command.projects.forEach { project -> add("@$project") }
                 if (command.text.isNotEmpty()) add(command.text)
@@ -151,11 +169,23 @@ class CaptureCoordinator(
         }
     }
 
+    fun onAudioFeatures(features: SpeechAudioFeatures) = synchronized(transitionLock) {
+        val current = mutableState.value
+        if (acceptsSpeech(current)) {
+            // Visual feedback does not revise the draft or invalidate a pending save.
+            mutableState.value = current.copy(
+                rms = features.level,
+                speechPitch = features.pitch,
+                speechTone = features.tone,
+            )
+        }
+    }
+
     fun onSpeechStopped() {
         synchronized(transitionLock) {
             val current = mutableState.value
             if (current.rms != 0f || current.speechOwnedRange != null) {
-                publishState(current.copy(rms = 0f, speechOwnedRange = null))
+                publishState(current.copy(rms = 0f, speechPitch = 0f, speechTone = 0f, speechOwnedRange = null))
             }
         }
     }
@@ -169,7 +199,7 @@ class CaptureCoordinator(
                 current.copy(
                     voiceEnabled = false,
                     speechOwnedRange = null,
-                    rms = 0f,
+                    rms = 0f, speechPitch = 0f, speechTone = 0f,
                     status = CaptureStatus.SpeechUnavailable,
                 ),
             )
@@ -187,7 +217,7 @@ class CaptureCoordinator(
                     mutableState.value.status == CaptureStatus.SaveUncertain
                 ) return
                 val current = mutableState.value
-                publishState(current.copy(status = CaptureStatus.Finalizing, rms = 0f))
+                publishState(current.copy(status = CaptureStatus.Finalizing, rms = 0f, speechPitch = 0f, speechTone = 0f))
                 current.voiceEnabled
             }
             if (finishSpeech) speech.finish()
@@ -200,7 +230,7 @@ class CaptureCoordinator(
                     current.copy(
                         voiceEnabled = false,
                         speechOwnedRange = null,
-                        rms = 0f,
+                        rms = 0f, speechPitch = 0f, speechTone = 0f,
                         status = if (text.isBlank()) current.status else CaptureStatus.Saving,
                     ),
                 )
@@ -316,7 +346,7 @@ class CaptureCoordinator(
                     current.copy(
                         voiceEnabled = false,
                         speechOwnedRange = null,
-                        rms = 0f,
+                        rms = 0f, speechPitch = 0f, speechTone = 0f,
                     ),
                 )
                 current.voiceEnabled
@@ -345,7 +375,7 @@ class CaptureCoordinator(
         val start = min(sourceRange.start, sourceRange.end).coerceIn(0, current.draft.text.length)
         val end = max(sourceRange.start, sourceRange.end).coerceIn(start, current.draft.text.length)
         val separated = if (start > 0 && !current.draft.text[start - 1].isWhitespace() &&
-            replacement.isNotEmpty() && !replacement.first().isWhitespace()
+            replacement.isNotEmpty() && !replacement.first().isWhitespace() && replacement.first() !in ".,!?;:"
         ) " $replacement" else replacement
         val updatedText = current.draft.text.replaceRange(start, end, separated)
         val cursor = start + separated.length

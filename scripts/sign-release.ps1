@@ -10,7 +10,7 @@ $releaseDir = Join-Path $projectDir 'releases'
 $keyFile = Join-Path $signingDir 'sidenote-release.jks'
 $passwordFile = Join-Path $signingDir 'password.xml'
 $unsigned = Join-Path $projectDir 'app/build/outputs/apk/release/app-release-unsigned.apk'
-$output = Join-Path $releaseDir 'SideNote-1.0.apk'
+$output = Join-Path $releaseDir 'SideNote-1.0.12.apk'
 if (!(Test-Path $unsigned)) { throw 'Build assembleRelease first.' }
 if ((Test-Path $keyFile) -and !(Test-Path $passwordFile)) { throw 'Existing key has no saved password. Restore it; do not replace the key.' }
 New-Item -ItemType Directory -Force $signingDir, $releaseDir | Out-Null

@@ -26,6 +26,7 @@ fun interface NotificationRefresher {
 }
 
 sealed interface NotificationRefreshResult {
+    data object Scheduled : NotificationRefreshResult
     data class Posted(val count: Int) : NotificationRefreshResult
 
     data object Removed : NotificationRefreshResult
