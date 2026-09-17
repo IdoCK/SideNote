@@ -1,0 +1,9 @@
+# SideNote changes include the personal site
+
+For every SideNote change and every new SDK/APK build, create or update a minimal personal-site impact plan **before implementation**. Run `node scripts/portfolio-plan.mjs`; it creates a draft for the Gradle version and never overwrites an existing plan. Same-version changes must update that plan too.
+
+The plan must cover descriptions, interactive demo, and screenshots. Review current native behavior and all published images. Capture new native screenshots for changed screens, or record a specific reason why an existing image remains accurate. Screenshots are required; do not silently omit this work. Use fictional notes only. Record provenance, represented app version, and review date. Label browser simulations, staged illustrations, and native screenshots honestly in the page.
+
+Edit the canonical bundle in `demos/` and `portfolio/`; PersonalSite receives generated copies. Complete desktop/mobile and interaction review, update `portfolio/manifest.json`, then mark the plan `Status: complete` and finish its checklist. Only after reviewing the actual assets run `node scripts/portfolio-check.mjs --seal` to refresh hashes and the native-source fingerprint. Never use sealing to bypass a required review. Run `node --test tests/portfolio-check.test.mjs` and `node scripts/portfolio-check.mjs` before signing/releasing.
+
+After an approved change, sync the bundle into PersonalSite using its documented importer and verify the rendered page, descriptions, screenshots, and demo together. Record the source revision and checks. If native capture, site access, or publishing is blocked, report the precise unfinished step; do not claim the site is current. Technical validation cannot certify that screenshot content or product claims are true: inspect them.

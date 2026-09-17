@@ -1,0 +1,94 @@
+{
+  "schemaVersion": 1,
+  "status": "ready",
+  "appVersion": "1.0.12",
+  "versionCode": 13,
+  "reviewedOn": "2026-09-17",
+  "plan": "portfolio/plans/1.0.12.md",
+  "appSourceSha256": "296ee5f743001bbf50bf16ac902ae4f72a2228287f1364eebeefeed2fc88058b",
+  "files": [
+    {
+      "source": "demos/sidenote-demo.html",
+      "target": "assets/sidenote-demo.html",
+      "sha256": "942ebc75790f3f4883eb29137a8587b5f301bb7eff9b43721a4ebfe6734a4572"
+    },
+    {
+      "source": "demos/archivo-1.woff2",
+      "target": "assets/archivo-1.woff2",
+      "sha256": "01170409e32e22123a354fbaa7dcb5ca5300790bb77c05d569ec8fdc394e78c9"
+    },
+    {
+      "source": "demos/archivo-3.woff2",
+      "target": "assets/archivo-3.woff2",
+      "sha256": "f3a513d89abf3bf1d5aa906b15f21eefe7a7c98a6cf6463929a0a4032639d264"
+    },
+    {
+      "source": "portfolio/page.html",
+      "target": "assets/sidenote/page.html",
+      "sha256": "0ed3e3b490caa03b5343f66b2cf9bdff84b6fc1fa94125a806e944fcaf7863be"
+    },
+    {
+      "source": "portfolio/screenshots/capture.webp",
+      "target": "assets/sidenote-story/capture.webp",
+      "sha256": "572a1f6456b2096f346af83464e8451ba027012fadb5733d9750720ab11365a4",
+      "kind": "browser",
+      "appVersion": "1.0.12",
+      "reviewedOn": "2026-09-17",
+      "provenance": "Recreated from the canonical 1.0.12 browser demo on 2026-09-17 with fictional Studio sample, simulated speech; page labels reconstruction."
+    },
+    {
+      "source": "portfolio/screenshots/review.webp",
+      "target": "assets/sidenote-story/review.webp",
+      "sha256": "9ca675af7b9e1cb9e8830ec7953677be79d79e05ee5a49305bf625f65fe2cc05",
+      "kind": "browser",
+      "appVersion": "1.0.12",
+      "reviewedOn": "2026-09-17",
+      "provenance": "Recreated from the canonical 1.0.12 browser demo on 2026-09-17 after guided save of same fictional Studio sample; page labels reconstruction."
+    },
+    {
+      "source": "portfolio/screenshots/face-down.png",
+      "target": "assets/sidenote-story/face-down.png",
+      "sha256": "7c33e9719bdaacc9e687b04940dbacff3e7483e7af26efa9635af760e16b8754",
+      "kind": "illustration",
+      "appVersion": "1.0.12",
+      "reviewedOn": "2026-09-17",
+      "provenance": "Existing staged gesture illustration reviewed for 1.0.12; face-down finish gesture unchanged. This is an illustration, not native screen evidence."
+    },
+    {
+      "source": "portfolio/screenshots/native-review.webp",
+      "target": "assets/sidenote/native-review.webp",
+      "sha256": "0255d076b8831db989856abe2c81e5dda762096e89e2015a9256fce946c21fcc",
+      "kind": "native",
+      "appVersion": "1.0.12",
+      "reviewedOn": "2026-09-17",
+      "provenance": "Fresh 1.0.12/code13 debug native Compose capture on Pixel_8_API_37, 2026-09-17, ReviewScreenTest synthetic fixture; lossless WebP. See NATIVE-PROVENANCE.md."
+    },
+    {
+      "source": "portfolio/screenshots/native-settings.webp",
+      "target": "assets/sidenote/native-settings.webp",
+      "sha256": "1471c1f475a7758415e436e8fcfeaad922046cb8115b5fd5a19791832210f12b",
+      "kind": "native",
+      "appVersion": "1.0.12",
+      "reviewedOn": "2026-09-17",
+      "provenance": "Fresh 1.0.12/code13 debug native Compose capture on Pixel_8_API_37, 2026-09-17, ReviewNavigationTest synthetic configured state; lossless WebP. See NATIVE-PROVENANCE.md."
+    },
+    {
+      "source": "portfolio/screenshots/hero.webp",
+      "target": "assets/sidenote-handheld-hero-v2.webp",
+      "sha256": "980685ff7433bba463b70919e6e41385cae0d3b29b523c537c37592ad374d778",
+      "kind": "staged",
+      "appVersion": "1.0.12",
+      "reviewedOn": "2026-09-17",
+      "provenance": "Previously approved generated Capture-in-use mockup retained after 1.0.12 review: capture layout/entry interaction unchanged by Review update. Staged mockup caption retained. Not a native screenshot."
+    },
+    {
+      "source": "portfolio/screenshots/thumbnail.webp",
+      "target": "assets/sidenote-thumbnail-portrait-v2.webp",
+      "sha256": "1ef85b8bc9bdb15711726e21f2c73107fffa89122268758bbc470cf873f6e23f",
+      "kind": "staged",
+      "appVersion": "1.0.12",
+      "reviewedOn": "2026-09-17",
+      "provenance": "Previously approved generated phone/Capture thumbnail retained after 1.0.12 review; Capture affordance unchanged by Review update. Not a native screenshot."
+    }
+  ]
+}

@@ -88,7 +88,7 @@ The successful save attempt's **local** date selects `YYYY-MM-DD.md`; local time
 
 `@ProjectName` names contain Unicode letters/digits, with hyphens or underscores instead of spaces. A note can contain multiple tokens; the first observed spelling is used for display during a scan. Explicit English/Hebrew voice commands remove the command phrase and insert the corresponding token. Ambiguous commands remain prose. Rename/merge is performed by editing Markdown externally, not through a hidden project database.
 
-After unlock, typing `@` in Capture offers matching project names rescanned from the Markdown source; no project index is created. Dates has a scrollable date browser and horizontal swipe alongside explicit Previous/Next buttons, and Projects can jump back to the source day. Review is also available from the launcher's static **Review SideNote** long-press shortcut even when there are zero notes or notifications are denied. The ongoing unprocessed reminder is derived by scanning recognized unchecked tasks; disabling notification permission does not prevent capture or Review.
+After unlock, typing `@` in Capture offers matching project names rescanned from the Markdown source; no project index is created. Dates has larger tappable date choices and horizontal swipe, and Projects can jump back to the source day. Review is also available from the launcher's static **Review SideNote** long-press shortcut even when there are zero notes or notifications are denied. The ongoing unprocessed reminder is derived by scanning recognized unchecked tasks; disabling notification permission does not prevent capture or Review.
 
 ## Failed writes and recovery
 

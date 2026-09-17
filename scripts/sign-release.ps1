@@ -5,13 +5,30 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $projectDir = Split-Path $PSScriptRoot -Parent
+& node (Join-Path $PSScriptRoot 'portfolio-check.mjs')
+if ($LASTEXITCODE -ne 0) { throw 'Complete the personal-site update plan, descriptions, demo and screenshot review before signing. See portfolio/README.md.' }
 $signingDir = Join-Path $projectDir '.signing'
 $releaseDir = Join-Path $projectDir 'releases'
 $keyFile = Join-Path $signingDir 'sidenote-release.jks'
 $passwordFile = Join-Path $signingDir 'password.xml'
 $unsigned = Join-Path $projectDir 'app/build/outputs/apk/release/app-release-unsigned.apk'
-$output = Join-Path $releaseDir 'SideNote-1.0.12.apk'
+$buildConfig = Get-Content -LiteralPath (Join-Path $projectDir 'app/build.gradle.kts') -Raw
+$releaseVersion = [regex]::Match($buildConfig, 'versionName\s*=\s*"([^"]+)"').Groups[1].Value
+if (!$releaseVersion) { throw 'Cannot read the app version.' }
+$output = Join-Path $releaseDir "SideNote-$releaseVersion.apk"
+$releaseCode = [regex]::Match($buildConfig, 'versionCode\s*=\s*(\d+)').Groups[1].Value
+$env:JAVA_HOME = $JavaHome
+$env:ANDROID_HOME = $AndroidHome
+& (Join-Path $projectDir 'gradlew.bat') -p $projectDir assembleRelease
+if ($LASTEXITCODE -ne 0) { throw 'Current release build failed; refusing to sign an older APK.' }
 if (!(Test-Path $unsigned)) { throw 'Build assembleRelease first.' }
+$toolsDir = Join-Path $AndroidHome "build-tools/$BuildTools"
+$apkMetadata = & (Join-Path $toolsDir 'aapt.exe') dump badging $unsigned
+if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect unsigned APK version.' }
+$packageLine = $apkMetadata | Select-String '^package:' | Select-Object -First 1
+if (!$packageLine -or $packageLine.Line -notmatch "versionCode='$releaseCode'" -or $packageLine.Line -notmatch "versionName='$([regex]::Escape($releaseVersion))'") {
+    throw 'Unsigned APK version does not match the app and reviewed portfolio bundle.'
+}
 if ((Test-Path $keyFile) -and !(Test-Path $passwordFile)) { throw 'Existing key has no saved password. Restore it; do not replace the key.' }
 New-Item -ItemType Directory -Force $signingDir, $releaseDir | Out-Null
 if (!(Test-Path $passwordFile)) {
