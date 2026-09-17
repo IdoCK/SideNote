@@ -4,7 +4,7 @@
   "appVersion": "1.0.13",
   "versionCode": 14,
   "reviewedOn": "2026-09-17",
-  "plan": "portfolio/plans/1.0.13.md",
+  "plan": "portfolio/plans/landscape-thumbnail.md",
   "appSourceSha256": "2e864879a1d3c9b81bf4446bdfb518aaf6bb056143343bfb2eb8fdf393e017e1",
   "files": [
     {
@@ -84,11 +84,11 @@
     {
       "source": "portfolio/screenshots/thumbnail.webp",
       "target": "assets/sidenote-thumbnail-portrait-v2.webp",
-      "sha256": "1ef85b8bc9bdb15711726e21f2c73107fffa89122268758bbc470cf873f6e23f",
+      "sha256": "3ac23ac958d52a2ee4a4ac6431ee16f8e43a0ac6d2239e45ec95837e2288981c",
       "kind": "staged",
       "appVersion": "1.0.13",
       "reviewedOn": "2026-09-17",
-      "provenance": "Previously approved generated phone/Capture thumbnail retained after 1.0.12 review; Capture affordance unchanged by Review update. Not a native screenshot. Positioning review 2026-09-17: retained; native UI and depicted demo screen contents are unchanged by this copy rebrand. Local 1.0.12 date-styling review 2026-09-17: Retained after visual inspection: staged Capture thumbnail contains no Review date strip; remains a staged image, not native evidence. Release review 2026-09-17 for 1.0.13/code14: retained capture/illustration from the previously documented version; only release metadata changed since visual verification, and the depicted UI/gesture is unchanged. This is not a new 1.0.13 native capture."
+      "provenance": "AI-generated staged Capture phone mockup, landscape 4:3 adaptation reviewed 2026-09-17. Entire phone shown with margins for hover zoom. Not a native screenshot. Product behavior and other release visuals unchanged."
     }
   ],
   "tagline": "Capture the thought. Come back to it later."
