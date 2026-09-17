@@ -10,7 +10,7 @@
     {
       "source": "demos/sidenote-demo.html",
       "target": "assets/sidenote-demo.html",
-      "sha256": "0bed0258e7d264e68ceff3feb89300003c1df563e2a8b64c6de1cba556256ab4"
+      "sha256": "e83bb143985b754772aafe948069b95b9b9288538b45951b3824d31bf6b90f27"
     },
     {
       "source": "demos/archivo-1.woff2",
@@ -25,7 +25,7 @@
     {
       "source": "portfolio/page.html",
       "target": "assets/sidenote/page.html",
-      "sha256": "e8d4a82ad45cc938d492f99665084ccbc5c0a27e4b856dc972ad509e0a55152e"
+      "sha256": "63b381b651a0ea1474892b6172b597af932bfec582be34a5f79e0078d1180bdf"
     },
     {
       "source": "portfolio/screenshots/capture.webp",
