@@ -25,7 +25,7 @@
     {
       "source": "portfolio/page.html",
       "target": "assets/sidenote/page.html",
-      "sha256": "a17fc1127e435a4c97dfce192352a7a3d012a8a6f2bf6b2af0ebe53c92525832"
+      "sha256": "bc28113080f44bfb4e98a69c8df9404edb8f504d2ae7969d72d8307af8d7b289"
     },
     {
       "source": "portfolio/screenshots/capture.webp",
