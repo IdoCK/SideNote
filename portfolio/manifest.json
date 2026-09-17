@@ -4,7 +4,7 @@
   "appVersion": "1.0.12",
   "versionCode": 13,
   "reviewedOn": "2026-09-17",
-  "plan": "portfolio/plans/1.0.12-positioning.md",
+  "plan": "portfolio/plans/1.0.12-responsive-layout.md",
   "appSourceSha256": "296ee5f743001bbf50bf16ac902ae4f72a2228287f1364eebeefeed2fc88058b",
   "files": [
     {
@@ -25,7 +25,7 @@
     {
       "source": "portfolio/page.html",
       "target": "assets/sidenote/page.html",
-      "sha256": "f90f3e9320bd289d627e2973f9be8ce45ad4b1a27c8fb961c995a4bfa13021b4"
+      "sha256": "a17fc1127e435a4c97dfce192352a7a3d012a8a6f2bf6b2af0ebe53c92525832"
     },
     {
       "source": "portfolio/screenshots/capture.webp",
