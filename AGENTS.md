@@ -1,5 +1,7 @@
 # SideNote changes include the personal site
 
+For all product/page copy, follow `portfolio/COPY.md`: quick capture without breaking flow, then review when ready. Use the approved headline “Capture the thought. Come back to it later.”
+
 For every SideNote change and every new SDK/APK build, create or update a minimal personal-site impact plan **before implementation**. Run `node scripts/portfolio-plan.mjs`; it creates a draft for the Gradle version and never overwrites an existing plan. Same-version changes must update that plan too.
 
 The plan must cover descriptions, interactive demo, and screenshots. Review current native behavior and all published images. Capture new native screenshots for changed screens, or record a specific reason why an existing image remains accurate. Screenshots are required; do not silently omit this work. Use fictional notes only. Record provenance, represented app version, and review date. Label browser simulations, staged illustrations, and native screenshots honestly in the page.

@@ -4,13 +4,13 @@
   "appVersion": "1.0.12",
   "versionCode": 13,
   "reviewedOn": "2026-09-17",
-  "plan": "portfolio/plans/1.0.12.md",
+  "plan": "portfolio/plans/1.0.12-positioning.md",
   "appSourceSha256": "296ee5f743001bbf50bf16ac902ae4f72a2228287f1364eebeefeed2fc88058b",
   "files": [
     {
       "source": "demos/sidenote-demo.html",
       "target": "assets/sidenote-demo.html",
-      "sha256": "942ebc75790f3f4883eb29137a8587b5f301bb7eff9b43721a4ebfe6734a4572"
+      "sha256": "8cd98b3c647971a8897f2d47a8473b5f476408a44a93a962eb4301ae6030ed93"
     },
     {
       "source": "demos/archivo-1.woff2",
@@ -25,7 +25,7 @@
     {
       "source": "portfolio/page.html",
       "target": "assets/sidenote/page.html",
-      "sha256": "0ed3e3b490caa03b5343f66b2cf9bdff84b6fc1fa94125a806e944fcaf7863be"
+      "sha256": "f90f3e9320bd289d627e2973f9be8ce45ad4b1a27c8fb961c995a4bfa13021b4"
     },
     {
       "source": "portfolio/screenshots/capture.webp",
@@ -34,7 +34,7 @@
       "kind": "browser",
       "appVersion": "1.0.12",
       "reviewedOn": "2026-09-17",
-      "provenance": "Recreated from the canonical 1.0.12 browser demo on 2026-09-17 with fictional Studio sample, simulated speech; page labels reconstruction."
+      "provenance": "Recreated from the canonical 1.0.12 browser demo on 2026-09-17 with fictional Studio sample, simulated speech; page labels reconstruction. Positioning review 2026-09-17: retained; native UI and depicted demo screen contents are unchanged by this copy rebrand."
     },
     {
       "source": "portfolio/screenshots/review.webp",
@@ -43,7 +43,7 @@
       "kind": "browser",
       "appVersion": "1.0.12",
       "reviewedOn": "2026-09-17",
-      "provenance": "Recreated from the canonical 1.0.12 browser demo on 2026-09-17 after guided save of same fictional Studio sample; page labels reconstruction."
+      "provenance": "Recreated from the canonical 1.0.12 browser demo on 2026-09-17 after guided save of same fictional Studio sample; page labels reconstruction. Positioning review 2026-09-17: retained; native UI and depicted demo screen contents are unchanged by this copy rebrand."
     },
     {
       "source": "portfolio/screenshots/face-down.png",
@@ -52,7 +52,7 @@
       "kind": "illustration",
       "appVersion": "1.0.12",
       "reviewedOn": "2026-09-17",
-      "provenance": "Existing staged gesture illustration reviewed for 1.0.12; face-down finish gesture unchanged. This is an illustration, not native screen evidence."
+      "provenance": "Existing staged gesture illustration reviewed for 1.0.12; face-down finish gesture unchanged. This is an illustration, not native screen evidence. Positioning review 2026-09-17: retained; native UI and depicted demo screen contents are unchanged by this copy rebrand."
     },
     {
       "source": "portfolio/screenshots/native-review.webp",
@@ -61,7 +61,7 @@
       "kind": "native",
       "appVersion": "1.0.12",
       "reviewedOn": "2026-09-17",
-      "provenance": "Fresh 1.0.12/code13 debug native Compose capture on Pixel_8_API_37, 2026-09-17, ReviewScreenTest synthetic fixture; lossless WebP. See NATIVE-PROVENANCE.md."
+      "provenance": "Fresh 1.0.12/code13 debug native Compose capture on Pixel_8_API_37, 2026-09-17, ReviewScreenTest synthetic fixture; lossless WebP. See NATIVE-PROVENANCE.md. Positioning review 2026-09-17: retained; native UI and depicted demo screen contents are unchanged by this copy rebrand."
     },
     {
       "source": "portfolio/screenshots/native-settings.webp",
@@ -70,7 +70,7 @@
       "kind": "native",
       "appVersion": "1.0.12",
       "reviewedOn": "2026-09-17",
-      "provenance": "Fresh 1.0.12/code13 debug native Compose capture on Pixel_8_API_37, 2026-09-17, ReviewNavigationTest synthetic configured state; lossless WebP. See NATIVE-PROVENANCE.md."
+      "provenance": "Fresh 1.0.12/code13 debug native Compose capture on Pixel_8_API_37, 2026-09-17, ReviewNavigationTest synthetic configured state; lossless WebP. See NATIVE-PROVENANCE.md. Positioning review 2026-09-17: retained; native UI and depicted demo screen contents are unchanged by this copy rebrand."
     },
     {
       "source": "portfolio/screenshots/hero.webp",
@@ -79,7 +79,7 @@
       "kind": "staged",
       "appVersion": "1.0.12",
       "reviewedOn": "2026-09-17",
-      "provenance": "Previously approved generated Capture-in-use mockup retained after 1.0.12 review: capture layout/entry interaction unchanged by Review update. Staged mockup caption retained. Not a native screenshot."
+      "provenance": "Previously approved generated Capture-in-use mockup retained after 1.0.12 review: capture layout/entry interaction unchanged by Review update. Staged mockup caption retained. Not a native screenshot. Positioning review 2026-09-17: retained; native UI and depicted demo screen contents are unchanged by this copy rebrand."
     },
     {
       "source": "portfolio/screenshots/thumbnail.webp",
@@ -88,7 +88,8 @@
       "kind": "staged",
       "appVersion": "1.0.12",
       "reviewedOn": "2026-09-17",
-      "provenance": "Previously approved generated phone/Capture thumbnail retained after 1.0.12 review; Capture affordance unchanged by Review update. Not a native screenshot."
+      "provenance": "Previously approved generated phone/Capture thumbnail retained after 1.0.12 review; Capture affordance unchanged by Review update. Not a native screenshot. Positioning review 2026-09-17: retained; native UI and depicted demo screen contents are unchanged by this copy rebrand."
     }
-  ]
+  ],
+  "tagline": "Capture the thought. Come back to it later."
 }
