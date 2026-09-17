@@ -166,6 +166,44 @@ class ReviewScreenTest {
     }
 
     @Test
+    fun onlySelectedDateHasBackgroundBeforeAndAfterSelection() {
+        val dates = listOf("2026-09-05", "2026-09-08", "2026-09-10").map(LocalDate::parse)
+        val note = entry("2026-09-05", "09:41", "Try a folded paper shade for the desk light. @Studio", false, 0)
+        var state by mutableStateOf(ReviewState(
+            days = dates.map { ReviewDay(it, if (it == dates.first()) listOf(note) else emptyList()) },
+            selectedDate = dates.first(),
+        ))
+        setContent {
+            ReviewScreen(
+                state = state, onShowDates = {}, onShowProjects = {},
+                onPreviousDay = {}, onNextDay = {}, onOpenSettings = {},
+                onToggleExpanded = {}, onProcessedChange = { _, _ -> },
+                onOpenProject = {}, onOpenSourceDay = {},
+                onSelectDate = { state = state.copy(selectedDate = it) },
+            )
+        }
+        fun assertDateSurfaces() {
+            dates.forEach { date ->
+                val node = compose.onNodeWithContentDescription("Open date $date")
+                val bitmap = node.captureToImage().asAndroidBitmap()
+                val expected = if (date == state.selectedDate) 0xFFF4F1EA.toInt() else 0xFF111111.toInt()
+                // Sample the perimeter and inner padding to catch both borders and fills.
+                listOf(0 to 0, 1 to bitmap.height / 2, 8 to 8,
+                    bitmap.width - 1 to bitmap.height - 1).forEach { (x, y) ->
+                    assertThat(bitmap.getPixel(x, y)).isEqualTo(expected)
+                }
+                if (date == state.selectedDate) node.assertIsSelected()
+            }
+        }
+        saveScreenshot("review-dates-selected-first.png")
+        assertDateSurfaces()
+        compose.onNodeWithContentDescription("Open date ${dates[1]}").performClick()
+        compose.waitForIdle()
+        saveScreenshot("review-dates-selected-second.png")
+        assertDateSurfaces()
+    }
+
+    @Test
     fun multilineNoteWithShortFirstLineStillExposesExpansion() {
         val note = entry("2026-08-27", "08:15", "First line\nMore detail", false, 0)
         var state by mutableStateOf(

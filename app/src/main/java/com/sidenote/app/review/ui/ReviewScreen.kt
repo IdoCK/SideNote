@@ -309,8 +309,8 @@ private fun DatesContent(
                     contentAlignment = Alignment.Center,
                     modifier = Modifier
                         .sizeIn(minWidth = 96.dp, minHeight = 56.dp)
-                        .background(if (selected) ReviewText else ReviewSurface, RectangleShape)
-                        .border(1.dp, if (selected) ReviewText else Color(0xFF555555))
+                        .background(if (selected) ReviewText else Color.Transparent, RectangleShape)
+                        .border(1.dp, if (selected) ReviewText else Color.Transparent)
                         .semantics { contentDescription = "Open date ${day.date}" }
                         .selectable(selected = selected, enabled = interactive, role = Role.Tab) {
                             onSelectDate(day.date)
