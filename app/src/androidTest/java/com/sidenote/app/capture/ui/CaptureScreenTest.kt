@@ -1,0 +1,608 @@
+package com.sidenote.app.capture.ui
+
+import android.net.Uri
+import androidx.activity.compose.setContent
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.graphics.toPixelMap
+import androidx.compose.ui.graphics.asAndroidBitmap
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.state.ToggleableState
+import androidx.compose.ui.test.SemanticsMatcher
+import androidx.compose.ui.test.assert
+import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsOff
+import androidx.compose.ui.test.assertIsOn
+import androidx.compose.ui.test.captureToImage
+import androidx.compose.ui.test.getUnclippedBoundsInRoot
+import androidx.compose.ui.test.junit4.v2.createEmptyComposeRule
+import androidx.compose.ui.test.onNodeWithContentDescription
+import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performSemanticsAction
+import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.unit.Density
+import androidx.test.core.app.ActivityScenario
+import androidx.test.core.app.ApplicationProvider
+import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.google.common.truth.Truth.assertThat
+import com.sidenote.app.AppContainer
+import com.sidenote.app.SideNoteApplication
+import com.sidenote.app.capture.CaptureActivity
+import com.sidenote.app.capture.CaptureDependencies
+import com.sidenote.app.capture.CaptureRecoveryHandoff
+import com.sidenote.app.capture.CaptureState
+import com.sidenote.app.capture.CompletionSignal
+import com.sidenote.app.capture.SpeechAvailability
+import com.sidenote.app.capture.SpeechEngine
+import com.sidenote.app.data.documents.AppendResult
+import com.sidenote.app.data.documents.DocumentRepository
+import com.sidenote.app.data.documents.UpdateResult
+import com.sidenote.app.data.markdown.EntrySource
+import com.sidenote.app.data.markdown.ParsedDailyFile
+import com.sidenote.app.data.markdown.ProjectToken
+import com.sidenote.app.data.recovery.RecoveryDraft
+import com.sidenote.app.data.recovery.RecoveryDraftStore
+import com.sidenote.app.data.recovery.RecoveryLoadResult
+import com.sidenote.app.data.settings.AppSettings
+import com.sidenote.app.data.settings.SettingsRepository
+import java.time.Clock
+import java.time.Instant
+import java.time.ZoneId
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+import org.junit.After
+import org.junit.Before
+import org.junit.Rule
+import org.junit.Test
+import org.junit.runner.RunWith
+
+@RunWith(AndroidJUnit4::class)
+class CaptureScreenTest {
+    @get:Rule
+    val compose = createEmptyComposeRule()
+
+    private val application =
+        ApplicationProvider.getApplicationContext<SideNoteApplication>()
+    private lateinit var originalContainer: AppContainer
+    private lateinit var container: CaptureUiTestContainer
+    private var scenario: ActivityScenario<CaptureActivity>? = null
+
+    @Before
+    fun installFakeContainer() {
+        originalContainer = application.container
+        container = CaptureUiTestContainer()
+        application.installContainerForTesting(container)
+    }
+
+    @After
+    fun restoreApplication() {
+        scenario?.close()
+        container.close()
+        application.installContainerForTesting(originalContainer)
+    }
+
+    @Test
+    fun captureHasOnlyTheApprovedCaptureControls() {
+        setContent {
+            CaptureScreen(CaptureState(), {}, {}, {})
+        }
+
+        listOf("Save", "Done", "Listening", "Language", "History", "Settings", "Review")
+            .forEach { prohibited ->
+                compose.onNodeWithText(prohibited, substring = true).assertDoesNotExist()
+            }
+        compose.onNodeWithContentDescription("Voice input on")
+            .assertIsDisplayed()
+            .assertIsOn()
+            .assert(
+                SemanticsMatcher.expectValue(SemanticsProperties.Role, Role.Switch),
+            )
+            .assert(
+                SemanticsMatcher.expectValue(
+                    SemanticsProperties.ToggleableState,
+                    ToggleableState.On,
+                ),
+            )
+    }
+
+    @Test
+    fun actualEditorRendersCaptureScopedNeutralSelectionHighlight() {
+        val text = "Selected capture text"
+        setContent {
+            CaptureScreen(
+                state = CaptureState(
+                    draft = TextFieldValue(text, TextRange(0, text.length)),
+                    voiceEnabled = false,
+                ),
+                onTextChanged = {},
+                onVoiceToggle = {},
+                onDiscard = {},
+            )
+        }
+
+        val pixels = compose.onNodeWithTag(CAPTURE_INPUT_TAG)
+            .captureToImage()
+            .toPixelMap()
+        var neutralSelectionPixels = 0
+        for (y in 0 until pixels.height) {
+            for (x in 0 until pixels.width) {
+                val color = pixels[x, y]
+                if (
+                    color.red in 0.13f..0.19f &&
+                    color.green in 0.13f..0.19f &&
+                    color.blue in 0.13f..0.19f
+                ) {
+                    neutralSelectionPixels += 1
+                }
+            }
+        }
+        assertThat(neutralSelectionPixels).isGreaterThan(40)
+    }
+
+    @Test
+    fun typingDispatchesTextAndBlobToggleIsAccessible() {
+        val edits = mutableListOf<TextFieldValue>()
+        var toggles = 0
+        var state by mutableStateOf(CaptureState(voiceEnabled = false))
+        setContent {
+            CaptureScreen(
+                state = state,
+                onTextChanged = { edits += it; state = state.copy(draft = it) },
+                onVoiceToggle = { toggles += 1; state = state.copy(voiceEnabled = !state.voiceEnabled) },
+                onDiscard = {},
+            )
+        }
+
+        compose.onNodeWithTag(CAPTURE_INPUT_TAG).performTextInput("שלום")
+        compose.runOnIdle {
+            assertThat(edits.last().text).isEqualTo("שלום")
+        }
+
+        compose.onNodeWithText("Back to speech").performClick()
+        compose.onNodeWithContentDescription("Voice input on").assertIsOn()
+        compose.runOnIdle {
+            assertThat(toggles).isEqualTo(1)
+        }
+    }
+
+    @Test
+    fun discardAppearsOnlyForANonEmptyDraft() {
+        var state by mutableStateOf(CaptureState())
+        setContent {
+            CaptureScreen(state, {}, {}, {})
+        }
+
+        compose.onNodeWithText("Discard").assertDoesNotExist()
+        compose.runOnIdle {
+            state = state.copy(
+                draft = TextFieldValue("not empty", TextRange(9)),
+            )
+        }
+        compose.onNodeWithText("Discard").assertIsDisplayed()
+    }
+
+    @Test
+    fun speechIsProminentAndEditorIsAnchoredAtBottom() {
+        setContent {
+            CaptureScreen(CaptureState(), {}, {}, {})
+        }
+
+        val root = compose.onNodeWithTag(CAPTURE_ROOT_TAG).getUnclippedBoundsInRoot()
+        val upper = compose.onNodeWithTag(CAPTURE_BLOB_REGION_TAG).getUnclippedBoundsInRoot()
+        val lower = compose.onNodeWithTag(CAPTURE_WRITING_REGION_TAG)
+            .getUnclippedBoundsInRoot()
+        val blob = compose.onNodeWithContentDescription("Voice input on")
+            .getUnclippedBoundsInRoot()
+        val card = compose.onNodeWithTag(CAPTURE_CARD_TAG).getUnclippedBoundsInRoot()
+        val rootWidth = root.right.value - root.left.value
+        val blobWidth = blob.right.value - blob.left.value
+        val blobHeight = blob.bottom.value - blob.top.value
+        val cardWidth = card.right.value - card.left.value
+
+        assertThat(blobWidth).isAtLeast(200f)
+        assertThat(blobHeight).isWithin(0.5f).of(blobWidth)
+        assertThat(cardWidth / rootWidth).isWithin(0.01f).of(0.90f)
+        assertThat(root.bottom.value - card.bottom.value).isAtMost(100f)
+        assertThat(card.top.value).isGreaterThan(blob.bottom.value)
+        assertThat((blob.left.value + blob.right.value) / 2f)
+            .isWithin(0.5f)
+            .of((upper.left.value + upper.right.value) / 2f)
+        assertThat((blob.top.value + blob.bottom.value) / 2f)
+            .isWithin(0.5f)
+            .of((upper.top.value + upper.bottom.value) / 2f)
+        assertThat(blob.bottom.value).isAtMost(upper.bottom.value)
+        assertThat(blobWidth).isAtLeast(48f)
+        assertThat(blobHeight).isAtLeast(48f)
+    }
+
+    @Test
+    fun liquidBlobChangesShapeWithoutMovingItsTapTarget() {
+        compose.mainClock.autoAdvance = false
+        setContent {
+            CaptureScreen(CaptureState(rms = 0.85f, voicePhase = com.sidenote.app.capture.VoicePhase.Listening), {}, {}, {})
+        }
+        compose.mainClock.advanceTimeBy(250)
+        val blob = compose.onNodeWithContentDescription("Voice input on")
+        val before = blob.getUnclippedBoundsInRoot()
+        compose.mainClock.advanceTimeBy(250)
+        val first = blob.captureToImage().toPixelMap()
+        savePreview("capture-liquid-1.png")
+        compose.mainClock.advanceTimeBy(2200)
+        val second = blob.captureToImage().toPixelMap()
+        savePreview("capture-liquid-2.png")
+        assertThat(blob.getUnclippedBoundsInRoot()).isEqualTo(before)
+        var changed = 0
+        for (y in 0 until first.height) for (x in 0 until first.width) {
+            if (kotlin.math.abs(first[x, y].red - second[x, y].red) > 0.15f) changed++
+        }
+        assertThat(changed).isGreaterThan(100)
+        compose.mainClock.autoAdvance = true
+    }
+
+    @Test
+    fun firstTranscriptDoesNotMoveOrResizeTheEditor() {
+        var state by mutableStateOf(CaptureState())
+        setContent { CaptureScreen(state, {}, {}, {}) }
+        val before = compose.onNodeWithTag(CAPTURE_CARD_TAG).getUnclippedBoundsInRoot()
+        compose.runOnIdle { state = state.copy(draft = TextFieldValue("first words")) }
+        val after = compose.onNodeWithTag(CAPTURE_CARD_TAG).getUnclippedBoundsInRoot()
+        assertThat(after.top.value).isWithin(1f).of(before.top.value)
+        assertThat(after.bottom.value).isWithin(1f).of(before.bottom.value)
+    }
+
+    @Test
+    fun focusingEditorRaisesItAndPausesSpeech() {
+        var state by mutableStateOf(CaptureState())
+        setContent {
+            CaptureScreen(state, {}, { state = state.copy(voiceEnabled = !state.voiceEnabled) }, {})
+        }
+        val originalTop = compose.onNodeWithTag(CAPTURE_CARD_TAG).getUnclippedBoundsInRoot().top
+        val originalHeight = compose.onNodeWithTag(CAPTURE_CARD_TAG).getUnclippedBoundsInRoot().let { it.bottom - it.top }
+        compose.waitUntil(timeoutMillis = 5_000) {
+            var focused = false
+            scenario?.onActivity { focused = it.hasWindowFocus() }
+            focused
+        }
+        compose.onNodeWithTag(CAPTURE_INPUT_TAG).performClick()
+        compose.waitForIdle()
+        compose.waitUntil(timeoutMillis = 5_000) {
+            var visible = false
+            scenario?.onActivity {
+                visible = it.window.decorView.rootWindowInsets.isVisible(android.view.WindowInsets.Type.ime())
+            }
+            visible
+        }
+        assertThat(state.voiceEnabled).isFalse()
+        compose.onNodeWithText("Back to speech").assertIsDisplayed()
+        val raisedTop = compose.onNodeWithTag(CAPTURE_CARD_TAG).getUnclippedBoundsInRoot().top
+        val raisedHeight = compose.onNodeWithTag(CAPTURE_CARD_TAG).getUnclippedBoundsInRoot().let { it.bottom - it.top }
+        assertThat(raisedHeight.value).isWithin(1f).of(originalHeight.value)
+        assertThat(raisedTop.value).isLessThan(originalTop.value - 100f)
+        savePreview("capture-typing.png")
+        val instrumentation = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation()
+        instrumentation.uiAutomation.waitForIdle(300, 3_000)
+        instrumentation.uiAutomation.takeScreenshot()?.let { bitmap ->
+            java.io.File(application.getExternalFilesDir(null), "capture-keyboard.png").outputStream().use {
+                bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it)
+            }
+            bitmap.recycle()
+        }
+        var keyboardTop = 0
+        var pixelDensity = 1f
+        val contentLocation = IntArray(2)
+        scenario?.onActivity {
+            keyboardTop = it.windowManager.currentWindowMetrics.bounds.bottom -
+                it.window.decorView.rootWindowInsets.getInsets(android.view.WindowInsets.Type.ime()).bottom
+            pixelDensity = it.resources.displayMetrics.density
+            it.findViewById<android.view.ViewGroup>(android.R.id.content).getChildAt(0)
+                .getLocationOnScreen(contentLocation)
+        }
+        val cardBounds = compose.onNodeWithTag(CAPTURE_CARD_TAG).bounds()
+        val writingBounds = compose.onNodeWithTag(CAPTURE_WRITING_REGION_TAG).bounds()
+        val rootBounds = compose.onNodeWithTag(CAPTURE_ROOT_TAG).bounds()
+        android.util.Log.i("SideNoteLayout", "keyboardTop=$keyboardTop card=$cardBounds writing=$writingBounds root=$rootBounds contentY=${contentLocation[1]} density=$pixelDensity")
+        val cardScreenBottom = cardBounds.bottom + contentLocation[1]
+        assertThat((keyboardTop - cardScreenBottom) / pixelDensity).isAtMost(100f)
+        assertThat(cardScreenBottom).isAtMost(keyboardTop.toFloat())
+        compose.onNodeWithText("Back to speech").performClick()
+        compose.waitForIdle()
+        assertThat(state.voiceEnabled).isTrue()
+        compose.onNodeWithContentDescription("Voice input on").assertIsDisplayed()
+    }
+
+    @Test
+    fun speechRetryOffersGuidanceInsteadOfClaimingVoiceIsUnavailable() {
+        var state by mutableStateOf(CaptureState(
+            voiceEnabled = false,
+            status = com.sidenote.app.capture.CaptureStatus.SpeechUnavailable,
+        ))
+        setContent { CaptureScreen(state, {}, {}, {}) }
+        compose.onNodeWithText("Tap the blob to use speech.").assertIsDisplayed()
+        compose.onNodeWithText("Voice is unavailable", substring = true).assertDoesNotExist()
+        savePreview("capture-speech-guidance.png")
+        compose.runOnIdle { state = state.copy(voiceEnabled = true, status = com.sidenote.app.capture.CaptureStatus.Ready) }
+        compose.onNodeWithText("Tap the blob to use speech.").assertDoesNotExist()
+    }
+
+    private fun savePreview(name: String) {
+        val bitmap = compose.onNodeWithTag(CAPTURE_ROOT_TAG).captureToImage()
+        java.io.File(application.getExternalFilesDir(null), name).outputStream().use {
+            bitmap.asAndroidBitmap().compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it)
+        }
+    }
+
+    @Test
+    fun englishAndHebrewUseContentDirectionAtLogicalStart() {
+        var state by mutableStateOf(
+            CaptureState(draft = TextFieldValue("English", TextRange(7))),
+        )
+        setContent {
+            CaptureScreen(state, {}, {}, {})
+        }
+
+        val english = textLayoutResult()
+        assertThat(english.getLineLeft(0)).isWithin(1f).of(0f)
+        assertThat(english.getLineRight(0)).isLessThan(english.size.width / 2f)
+
+        compose.runOnIdle {
+            state = CaptureState(draft = TextFieldValue("עברית", TextRange(5)))
+        }
+        val hebrew = textLayoutResult()
+        assertThat(hebrew.getLineLeft(0)).isGreaterThan(hebrew.size.width / 2f)
+        assertThat(hebrew.getLineRight(0)).isWithin(1f).of(hebrew.size.width.toFloat())
+    }
+
+    @Test
+    fun mixedBidirectionalTextAndDraftDerivedProjectChipsRemainVisible() {
+        var state by mutableStateOf(
+            CaptureState(
+                draft = TextFieldValue(
+                    "Plan שיפוץ 42 @Home @בית",
+                    TextRange(25),
+                ),
+            ),
+        )
+        setContent {
+            CaptureScreen(state, {}, {}, {})
+        }
+
+        compose.onNodeWithText("Plan שיפוץ 42 @Home @בית").assertIsDisplayed()
+        compose.onNodeWithTag("$PROJECT_CHIP_TAG_PREFIX.Home").assertIsDisplayed()
+        compose.onNodeWithTag("$PROJECT_CHIP_TAG_PREFIX.בית").assertIsDisplayed()
+
+        compose.runOnIdle {
+            state = CaptureState(draft = TextFieldValue("plain", TextRange(5)))
+        }
+        compose.onNodeWithTag("$PROJECT_CHIP_TAG_PREFIX.Home").assertDoesNotExist()
+        compose.onNodeWithTag("$PROJECT_CHIP_TAG_PREFIX.בית").assertDoesNotExist()
+    }
+
+    @Test
+    fun markdownDerivedSuggestionReplacesTheActivePrefixWithoutLosingTextFieldState() {
+        var edited: TextFieldValue? = null
+        setContent {
+            CaptureScreen(
+                state = CaptureState(
+                    draft = TextFieldValue(
+                        text = "Plan @ho then more",
+                        selection = TextRange(8),
+                        composition = TextRange(14, 18),
+                    ),
+                    projectSuggestions = listOf(ProjectToken("home", "Home")),
+                ),
+                onTextChanged = { edited = it },
+                onVoiceToggle = {},
+                onDiscard = {},
+            )
+        }
+
+        compose.onNodeWithTag("$PROJECT_SUGGESTION_TAG_PREFIX.home")
+            .assertIsDisplayed()
+            .performClick()
+        compose.runOnIdle {
+            assertThat(edited?.text).isEqualTo("Plan @Home then more")
+            assertThat(edited?.selection).isEqualTo(TextRange(10))
+            assertThat(edited?.composition).isEqualTo(TextRange(16, 20))
+        }
+    }
+
+    @Test
+    fun wrappedProjectChipsAndWritingCardStayInsideCaptureWidth() {
+        val projects = listOf(
+            "AlphaProject",
+            "BetaProject",
+            "GammaProject",
+            "DeltaProject",
+            "EpsilonProject",
+        )
+        setContent {
+            CaptureScreen(
+                state = CaptureState(
+                    draft = TextFieldValue(
+                        projects.joinToString(" ") { "@$it" },
+                    ),
+                ),
+                onTextChanged = {},
+                onVoiceToggle = {},
+                onDiscard = {},
+            )
+        }
+
+        val root = compose.onNodeWithTag(CAPTURE_ROOT_TAG).getUnclippedBoundsInRoot()
+        val chipBounds = projects.map { project ->
+            compose.onNodeWithTag("$PROJECT_CHIP_TAG_PREFIX.$project")
+                .assertIsDisplayed()
+                .getUnclippedBoundsInRoot()
+        }
+        chipBounds.forEach { chip ->
+            assertThat(chip.left.value).isAtLeast(root.left.value)
+            assertThat(chip.right.value).isAtMost(root.right.value)
+        }
+        assertThat(chipBounds.map { it.top.value.toInt() }.distinct().size).isGreaterThan(1)
+        val card = compose.onNodeWithTag(CAPTURE_CARD_TAG)
+            .assertIsDisplayed()
+            .getUnclippedBoundsInRoot()
+        assertThat(card.left.value).isAtLeast(root.left.value)
+        assertThat(card.right.value).isAtMost(root.right.value)
+    }
+
+    @Test
+    fun fontScaleTwoKeepsCaptureContentWithinTheVisibleRoot() {
+        var effectiveFontScale: Float? = null
+        setContent {
+            val density = LocalDensity.current
+            CompositionLocalProvider(
+                LocalDensity provides Density(density.density, fontScale = 2f),
+            ) {
+                effectiveFontScale = LocalDensity.current.fontScale
+                CaptureScreen(
+                    state = CaptureState(
+                        draft = TextFieldValue(
+                            "Long mixed draft שצריך להישאר visible at large text",
+                        ),
+                    ),
+                    onTextChanged = {},
+                    onVoiceToggle = {},
+                    onDiscard = {},
+                )
+            }
+        }
+
+        val root = compose.onNodeWithTag(CAPTURE_ROOT_TAG).bounds()
+        val blob = compose.onNodeWithContentDescription("Voice input on")
+            .assertIsDisplayed()
+            .bounds()
+        val card = compose.onNodeWithTag(CAPTURE_CARD_TAG).assertIsDisplayed().bounds()
+        val input = compose.onNodeWithTag(CAPTURE_INPUT_TAG).assertIsDisplayed().bounds()
+        val discard = compose.onNodeWithText("Discard").assertIsDisplayed().bounds()
+        val textLayout = textLayoutResult()
+        assertContained(blob, root)
+        assertContained(card, root)
+        assertContained(input, card)
+        assertContained(discard, root)
+        assertThat(textLayout.getLineBottom(textLayout.lineCount - 1))
+            .isAtMost(input.height)
+        compose.runOnIdle { assertThat(effectiveFontScale).isEqualTo(2f) }
+    }
+
+    private fun textLayoutResult(): TextLayoutResult {
+        val results = mutableListOf<TextLayoutResult>()
+        compose.onNodeWithTag(CAPTURE_INPUT_TAG).performSemanticsAction(
+            SemanticsActions.GetTextLayoutResult,
+        ) { action ->
+            assertThat(action(results)).isTrue()
+        }
+        return results.single()
+    }
+
+    private fun androidx.compose.ui.test.SemanticsNodeInteraction.bounds(): Rect =
+        fetchSemanticsNode().boundsInRoot
+
+    private fun assertContained(child: Rect, parent: Rect) {
+        assertThat(child.left).isAtLeast(parent.left)
+        assertThat(child.top).isAtLeast(parent.top)
+        assertThat(child.right).isAtMost(parent.right)
+        assertThat(child.bottom).isAtMost(parent.bottom)
+    }
+
+    private fun setContent(content: @Composable () -> Unit) {
+        scenario = ActivityScenario.launch(CaptureActivity::class.java)
+        scenario?.onActivity { activity -> activity.setContent(content = content) }
+        compose.waitForIdle()
+    }
+}
+
+private class CaptureUiTestContainer : AppContainer {
+    private val recovery = EmptyUiRecoveryStore()
+    private val processScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val recoveryHandoff = CaptureRecoveryHandoff(recovery, processScope)
+
+    override fun captureDependencies(): CaptureDependencies = CaptureDependencies(
+        settings = UiSettingsRepository,
+        repository = UiDocumentRepository,
+        speechFactory = { UiSpeechEngine },
+        completionSignals = MutableSharedFlow<CompletionSignal>(),
+        clock = Clock.fixed(Instant.EPOCH, ZoneId.of("UTC")),
+        zone = ZoneId.of("UTC"),
+        ioDispatcher = Dispatchers.IO,
+        recoveryHandoff = recoveryHandoff,
+    )
+
+    fun close() {
+        processScope.cancel()
+    }
+}
+
+private object UiSettingsRepository : SettingsRepository {
+    override val settings: Flow<AppSettings> = MutableStateFlow(
+        AppSettings(
+            treeUri = null,
+            voiceOnAtLaunch = false,
+            onboardingComplete = true,
+        ),
+    )
+
+    override suspend fun setTreeUri(treeUri: Uri?) = Unit
+
+    override suspend fun setVoiceOnAtLaunch(enabled: Boolean) = Unit
+
+    override suspend fun acceptVoiceDisclosureAndSetFallback(allowed: Boolean) = Unit
+
+    override suspend fun setOnboardingComplete(complete: Boolean) = Unit
+}
+
+private object UiDocumentRepository : DocumentRepository {
+    override suspend fun append(
+        text: String,
+        committedAt: Instant,
+        zone: ZoneId,
+    ): AppendResult = AppendResult.Success
+
+    override suspend fun days(): List<ParsedDailyFile> = emptyList()
+
+    override suspend fun setProcessed(
+        source: EntrySource,
+        fileName: String,
+        expectedRaw: String,
+        processed: Boolean,
+    ): UpdateResult = error("Not used by CaptureScreenTest")
+
+    override suspend fun uncheckedCount(): Int = 0
+}
+
+private class EmptyUiRecoveryStore : RecoveryDraftStore {
+    override suspend fun load(): RecoveryLoadResult = RecoveryLoadResult.Empty
+
+    override suspend fun save(draft: RecoveryDraft) = Unit
+
+    override suspend fun clear() = Unit
+}
+
+private object UiSpeechEngine : SpeechEngine {
+    override suspend fun support(): SpeechAvailability = SpeechAvailability.Available
+
+    override suspend fun requestModelDownloads() = Unit
+
+    override fun start(listener: SpeechEngine.Listener) = Unit
+
+    override fun stop() = Unit
+
+    override fun destroy() = Unit
+}

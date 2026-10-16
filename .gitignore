@@ -1,0 +1,33 @@
+.worktrees/
+
+# Android/Gradle generated files
+.gradle/
+.kotlin/
+build/
+app/build/
+local.properties
+
+# Android Studio / IntelliJ
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# Local acceptance captures and signing secrets
+*.jks
+*.keystore
+acceptance-artifacts/
+*.hprof
+.signing/
+releases/
+
+# Local credentials and private environment configuration
+.env
+.env.*
+!.env.example
+!.env.sample
+*.p12
+*.pfx
+*.key
+.secrets/
+password.xml
